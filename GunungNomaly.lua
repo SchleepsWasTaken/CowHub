@@ -1,6 +1,6 @@
 -- Rayfield GUI with Fly Mode and Teleport Script for [BARU] Gunung Nomaly
 -- Compatible with Delta Mobile Executor and PC Executors (e.g., Xeno)
--- Includes flying mode with speed control and teleport to checkpoints in Workspace.Checkpoints
+-- Improved checkpoint detection and fly menu visibility
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
@@ -17,14 +17,14 @@ local Window = Rayfield:CreateWindow({
 })
 
 -- Tab for Flight Controls
-local FlightTab = Window:CreateTab("Flight Controls", nil)
+local FlightTab = Window:CreateTab("Flight Controls", 1103511846) -- Icon ID for flight
 
 -- Tab for Checkpoint Teleports
-local TPTab = Window:CreateTab("Checkpoint Teleports", nil)
+local TPTab = Window:CreateTab("Checkpoint Teleports", 1103511847) -- Icon ID for teleport
 
 -- Flying variables
 local player = game.Players.LocalPlayer
-local character = player.Character
+local character = player.Character or player.CharacterAdded:Wait()
 local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 local humanoid = character and character:FindFirstChild("Humanoid")
 local bodyVelocity, bodyGyro
@@ -34,7 +34,7 @@ local maxSpeed = 200
 
 -- Function to start flying
 local function startFlying()
-   if not character or not humanoidRootPart or not humanoid then return end
+   if not character or not humanoidRootPart or not humanoid or humanoid.Health <= 0 then return end
    isFlying = true
    humanoid.PlatformStand = true
 
@@ -56,28 +56,14 @@ local function startFlying()
          local inputState = game:GetService("UserInputService")
          local cameraCFrame = camera.CFrame
 
-         if inputState:IsKeyDown(Enum.KeyCode.W) then
-            moveDirection = moveDirection + cameraCFrame.LookVector
-         end
-         if inputState:IsKeyDown(Enum.KeyCode.S) then
-            moveDirection = moveDirection - cameraCFrame.LookVector
-         end
-         if inputState:IsKeyDown(Enum.KeyCode.A) then
-            moveDirection = moveDirection - cameraCFrame.RightVector
-         end
-         if inputState:IsKeyDown(Enum.KeyCode.D) then
-            moveDirection = moveDirection + cameraCFrame.RightVector
-         end
-         if inputState:IsKeyDown(Enum.KeyCode.Space) then
-            moveDirection = moveDirection + Vector3.new(0, 1, 0)
-         end
-         if inputState:IsKeyDown(Enum.KeyCode.LeftShift) then
-            moveDirection = moveDirection - Vector3.new(0, 1, 0)
-         end
+         if inputState:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + cameraCFrame.LookVector end
+         if inputState:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - cameraCFrame.LookVector end
+         if inputState:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - cameraCFrame.RightVector end
+         if inputState:IsKeyDown(Enum.KeyCode.D) then moveDirection = moveDirection + cameraCFrame.RightVector end
+         if inputState:IsKeyDown(Enum.KeyCode.Space) then moveDirection = moveDirection + Vector3.new(0, 1, 0) end
+         if inputState:IsKeyDown(Enum.KeyCode.LeftShift) then moveDirection = moveDirection - Vector3.new(0, 1, 0) end
 
-         if moveDirection.Magnitude > 0 then
-            moveDirection = moveDirection.Unit * flySpeed
-         end
+         if moveDirection.Magnitude > 0 then moveDirection = moveDirection.Unit * flySpeed end
          bodyVelocity.Velocity = moveDirection
          bodyGyro.CFrame = CFrame.new(Vector3.new(0, 0, 0), cameraCFrame.LookVector)
 
@@ -125,17 +111,7 @@ FlightTab:CreateToggle({
    CurrentValue = false,
    Callback = function(Value)
       if Value then
-         if character and humanoidRootPart and humanoid and humanoid.Health > 0 then
-            startFlying()
-         else
-            Rayfield:Notify({
-               Title = "Error",
-               Content = "Player character not loaded.",
-               Duration = 3,
-               Image = nil,
-               Actions = {}
-            })
-         end
+         startFlying()
       else
          stopFlying()
       end
@@ -160,6 +136,8 @@ FlightTab:CreateSlider({
    end
 })
 
+FlightTab:CreateLabel("Fly Menu Active - Use WASD/Space/Shift")
+
 -- Function to find and sort checkpoints
 local function findCheckpoints()
    local checkpoints = {}
@@ -174,19 +152,18 @@ local function findCheckpoints()
          return tonumber(string.match(a.Name, "%d+")) < tonumber(string.match(b.Name, "%d+"))
       end)
    else
-      Rayfield:Notify({
-         Title = "Error",
-         Content = "Checkpoints folder not found in Workspace.",
-         Duration = 5,
-         Image = nil,
-         Actions = {}
-      })
+      TPTab:CreateLabel("Error: Checkpoints folder not found.")
    end
    return checkpoints
 end
 
--- Get checkpoints
+-- Get and list checkpoints
 local checkpoints = findCheckpoints()
+if #checkpoints > 0 then
+   TPTab:CreateLabel("Detected Checkpoints: " .. table.concat(table.map(checkpoints, function(cp) return cp.Name end), ", "))
+else
+   TPTab:CreateLabel("No checkpoints detected matching 'CheckpointX' pattern.")
+end
 
 -- Create teleport buttons
 if #checkpoints > 0 then
@@ -216,38 +193,38 @@ if #checkpoints > 0 then
          end
       })
    end
-else
-   TPTab:CreateLabel("No checkpoints found matching 'CheckpointX' pattern.")
 end
 
 -- Auto-Teleport through all checkpoints
-TPTab:CreateButton({
-   Name = "Auto TP Through All Checkpoints",
-   Callback = function()
-      local player = game.Players.LocalPlayer
-      if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-         for i, cp in ipairs(checkpoints) do
-            player.Character.HumanoidRootPart.CFrame = cp.CFrame * CFrame.new(0, 5, 0)
-            wait(1)
+if #checkpoints > 0 then
+   TPTab:CreateButton({
+      Name = "Auto TP Through All Checkpoints",
+      Callback = function()
+         local player = game.Players.LocalPlayer
+         if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            for i, cp in ipairs(checkpoints) do
+               player.Character.HumanoidRootPart.CFrame = cp.CFrame * CFrame.new(0, 5, 0)
+               wait(1)
+            end
+            Rayfield:Notify({
+               Title = "Auto TP Complete",
+               Content = "Teleported through all checkpoints.",
+               Duration = 5,
+               Image = nil,
+               Actions = {}
+            })
+         else
+            Rayfield:Notify({
+               Title = "Error",
+               Content = "Player character not found.",
+               Duration = 3,
+               Image = nil,
+               Actions = {}
+            })
          end
-         Rayfield:Notify({
-            Title = "Auto TP Complete",
-            Content = "Teleported through all checkpoints.",
-            Duration = 5,
-            Image = nil,
-            Actions = {}
-         })
-      else
-         Rayfield:Notify({
-            Title = "Error",
-            Content = "Player character not found.",
-            Duration = 3,
-            Image = nil,
-            Actions = {}
-         })
       end
-   end
-})
+   })
+end
 
 -- Toggle GUI visibility
 local function createVisibilityToggle(tab)
