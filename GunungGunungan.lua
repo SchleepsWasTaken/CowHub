@@ -181,8 +181,7 @@ end
 
 local function buildCheckpointEntry(child)
     -- Accept BasePart / Model / Folder (folder may contain parts/models)
-    local entry = { name = child.Name, root = child }
-
+    -- Returns entry or nil if no BasePart could be found inside.
     local function findAnyPart(inst)
         if inst:IsA("BasePart") then return inst end
         if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
@@ -192,6 +191,10 @@ local function buildCheckpointEntry(child)
         return nil
     end
 
+    local anchor = findAnyPart(child)
+    if not anchor then return nil end
+
+    local entry = { name = child.Name, root = child }
     entry.getCFrame = function()
         if child:IsA("BasePart") then
             return child.CFrame
@@ -199,20 +202,60 @@ local function buildCheckpointEntry(child)
             if child.PrimaryPart then return child.PrimaryPart.CFrame end
             local cf = child:GetBoundingBox(); return cf
         else -- Folder or other container
-            local p = findAnyPart(child)
-            if p then return p.CFrame end
-            local ok, cf = pcall(function() return child:GetPivot() end)
-            if ok then return cf end
-            return CFrame.new()
+            return anchor.CFrame
         end
     end
-
     return entry
 end
 
 local function collectCheckpoints()
     checkpoints = {}; cpIndexByName = {}
     local folder = resolveFolder(); if not folder then return end
+
+    -- We consider the "checkpoint object" to be the NEAREST ancestor directly under
+    -- Workspace.Checkpoints that contains a BasePart anywhere inside.
+    local seen = {} -- [Instance] = true (roots under folder)
+
+    -- include direct children first
+    for _, child in ipairs(folder:GetChildren()) do
+        if (child:IsA("BasePart") or child:IsA("Model") or child:IsA("Folder")) then
+            local entry = buildCheckpointEntry(child)
+            if entry then
+                seen[child] = true
+                table.insert(checkpoints, entry)
+            end
+        end
+    end
+
+    -- include descendants that belong to a different root under folder
+    for _, d in ipairs(folder:GetDescendants()) do
+        if d:IsA("BasePart") or d:IsA("Model") then
+            local root = d
+            while root and root.Parent ~= folder do
+                root = root.Parent
+            end
+            if root and not seen[root] then
+                local entry = buildCheckpointEntry(root)
+                if entry then
+                    seen[root] = true
+                    table.insert(checkpoints, entry)
+                end
+            end
+        end
+    end
+
+    -- sort: numeric asc, then alpha, Summit last
+    for _, it in ipairs(checkpoints) do
+        local n = tonumber(it.name)
+        local lower = string.lower(it.name)
+        local summit = (lower == "summit")
+        if summit then it._group, it._key = 2, math.huge
+        elseif n then it._group, it._key = 0, n
+        else it._group, it._key = 1, lower end
+    end
+    table.sort(checkpoints, function(a,b) if a._group ~= b._group then return a._group < b._group end return a._key < b._key end)
+    for i, it in ipairs(checkpoints) do cpIndexByName[it.name] = i end
+end
     for _, child in ipairs(folder:GetChildren()) do
         if child:IsA("BasePart") or child:IsA("Model") then
             table.insert(checkpoints, buildCheckpointEntry(child))
