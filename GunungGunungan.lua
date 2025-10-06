@@ -1,278 +1,282 @@
--- Gunung Nomaly Utility GUI
--- Fly + Noclip + Checkpoint TP (single persistent slider) + Tap/Click TP
--- Safe Rayfield loader (executor or Studio)
-
--- === Safe Rayfield loader ===
-local Rayfield
-do
-    local okGet, src = pcall(game.HttpGet, game, "https://sirius.menu/rayfield")
-    if okGet and typeof(loadstring) == "function" then
-        local fn = loadstring(src)
-        if fn then
-            local okRun, lib = pcall(fn)
-            if okRun and type(lib) == "table" and lib.CreateWindow then Rayfield = lib end
-        end
-    end
-end
-if not Rayfield then
-    local RS = game:GetService("ReplicatedStorage")
-    local okRequire, lib = pcall(function() return require(RS:WaitForChild("Rayfield", 5)) end)
-    if okRequire and type(lib) == "table" and lib.CreateWindow then Rayfield = lib end
-end
-if not Rayfield then warn("[Rayfield] Could not load"); return end
-
--- === Window & tabs ===
-local Window   = Rayfield:CreateWindow({ Name = "Gunung Nomaly Utility GUI",
-    LoadingTitle = "Flight & TP Script", LoadingSubtitle = "by Babang Sekelep",
-    ConfigurationSaving = {Enabled=false}})
-local FlightTab = Window:CreateTab("Flight Controls", 1103511846)
-local TPTab     = Window:CreateTab("Checkpoint Teleports", 1103511847)
-
--- === Services/locals ===
-local Players   = game:GetService("Players")
-local RunService= game:GetService("RunService")
-local UIS       = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
-local LP        = Players.LocalPlayer
-
-local function SafeWait(parent, name, t)
-    local x = parent:FindFirstChild(name); if x then return x end
-    local ok,res = pcall(function() return parent:WaitForChild(name, t or 5) end)
-    if ok then return res end
-end
-
-local function getCharacter()
-    local c = LP.Character or LP.CharacterAdded:Wait()
-    local hrp = c:FindFirstChild("HumanoidRootPart") or SafeWait(c,"HumanoidRootPart",5)
-    local hum = c:FindFirstChildOfClass("Humanoid") or SafeWait(c,"Humanoid",5)
-    return c, hrp, hum
-end
-
-local Character, HRP, Humanoid = getCharacter()
-
--- === Fly ===
-local isFlying, flySpeed, MAX_SPEED = false, 50, 200
-local vel, gyro
-local function startFlying()
-    if not Character or not HRP or not Humanoid or Humanoid.Health<=0 or isFlying then return end
-    isFlying = true; Humanoid.PlatformStand = true
-    vel = Instance.new("BodyVelocity"); vel.MaxForce = Vector3.new(math.huge,math.huge,math.huge); vel.Parent = HRP
-    gyro = Instance.new("BodyGyro");   gyro.MaxTorque = Vector3.new(4e5,4e5,4e5); gyro.P=3000; gyro.D=500; gyro.Parent=HRP
-    task.spawn(function()
-        local cam = Workspace.CurrentCamera
-        while isFlying and HRP and Humanoid and Humanoid.Health>0 do
-            local move = Vector3.new(); local cf = cam.CFrame
-            if UIS:IsKeyDown(Enum.KeyCode.W) then move += cf.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.S) then move -= cf.LookVector end
-            if UIS:IsKeyDown(Enum.KeyCode.A) then move -= cf.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.D) then move += cf.RightVector end
-            if UIS:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0,1,0) end
-            if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move -= Vector3.new(0,1,0) end
-            if move.Magnitude>0 then move = move.Unit*flySpeed end
-            vel.Velocity = move; local p = HRP.Position; gyro.CFrame = CFrame.new(p, p+cf.LookVector)
-            RunService.Heartbeat:Wait()
-        end
-    end)
-    Rayfield:Notify({Title="Flying Enabled", Content="Use WASD/Space/Shift.", Duration=2})
-end
-local function stopFlying()
-    if not isFlying then return end
-    isFlying=false; if vel then vel:Destroy() end; if gyro then gyro:Destroy() end; if Humanoid then Humanoid.PlatformStand=false end
-    Rayfield:Notify({Title="Flying Disabled", Duration=2})
-end
-UIS.InputBegan:Connect(function(i,gp)
-    if gp then return end
-    if i.UserInputType==Enum.UserInputType.Keyboard and i.KeyCode==Enum.KeyCode.F then
-        if isFlying then stopFlying() else startFlying() end
-    end
-end)
-
--- === Noclip ===
-local noclipOn, noclipConn = false, nil
-local function setCollide(on)
-    if not Character then return end
-    for _,d in ipairs(Character:GetDescendants()) do if d:IsA("BasePart") then d.CanCollide = on end end
-end
-local function enableNoclip(on)
-    noclipOn = on; if noclipConn then noclipConn:Disconnect(); noclipConn=nil end
-    if on then noclipConn = RunService.Stepped:Connect(function() setCollide(false) end) else setCollide(true) end
-end
-if Humanoid then Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end) end
-LP.CharacterAdded:Connect(function(c)
-    Character=c; HRP=SafeWait(c,"HumanoidRootPart",5); Humanoid=SafeWait(c,"Humanoid",5)
-    pcall(function() if Humanoid then Humanoid.PlatformStand=false end end)
-    if noclipOn then enableNoclip(true) end
-end)
-
--- === Flight tab UI ===
-FlightTab:CreateToggle({Name="Toggle Fly", CurrentValue=false, Callback=function(v) if v then startFlying() else stopFlying() end end})
-FlightTab:CreateSlider({Name="Fly Speed", Range={10,MAX_SPEED}, Increment=5, Suffix="speed",
-    CurrentValue=flySpeed, Callback=function(v) flySpeed=v end})
-FlightTab:CreateToggle({Name="Noclip (no collisions)", CurrentValue=false, Callback=function(v) enableNoclip(v) end})
-FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
-
--- === Checkpoints: persistent slider ===
+-- ====================
+-- Checkpoint detection (EXACT folder) WITH CUSTOM SLIDER UI
+-- ====================
 local CP_FOLDER_NAME = "Checkpoints"
-local checkpoints = {}      -- { {name="1", root=Instance}, ... } (only numeric names + 'Summit' ignored by slider)
-local cpIndexByName = {}    -- name -> index in checkpoints
+local checkpoints = {}      -- { {name="10", root=Instance}, ... }  (numeric only for slider)
+local cpIndexByName = {}    -- name -> index
+local selectedName          -- string number
 local labelDetected
+local folderConn, folderChildConn
+local refreshDebounce = false
 
--- whitelist: numeric only (slider), but we still keep Summit in list for auto-TP if you want later
 local function isNumericName(n) return string.match(n, "^%d+$") ~= nil end
-
 local function resolveFolder() return Workspace:FindFirstChild(CP_FOLDER_NAME) end
 
 local function namesArray()
-    local t = {}; for i,cp in ipairs(checkpoints) do t[i]=cp.name end; return t
+    local t = {}
+    for i, cp in ipairs(checkpoints) do t[i] = cp.name end
+    return t
 end
 
 local function tryResolveAnchorCF(root)
     if not root then return nil end
     if root:IsA("BasePart") then return root.CFrame end
-    if root:IsA("Model") then if root.PrimaryPart then return root.PrimaryPart.CFrame end; local cf = root:GetBoundingBox(); return cf end
-    for _,d in ipairs(root:GetDescendants()) do if d:IsA("BasePart") then return d.CFrame end end
+    if root:IsA("Model") then
+        if root.PrimaryPart then return root.PrimaryPart.CFrame end
+        local cf = root:GetBoundingBox(); return cf
+    end
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") then return d.CFrame end
+    end
     return nil
 end
 
 local function collectCheckpoints()
-    checkpoints = {}; cpIndexByName={}
+    checkpoints = {}; cpIndexByName = {}
     local folder = resolveFolder(); if not folder then return end
     for _, child in ipairs(folder:GetChildren()) do
         if (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) and isNumericName(child.Name) then
-            table.insert(checkpoints, {name=child.Name, root=child})
+            table.insert(checkpoints, { name = child.Name, root = child })
         end
     end
-    table.sort(checkpoints, function(a,b) return tonumber(a.name)<tonumber(b.name) end)
-    for i,it in ipairs(checkpoints) do cpIndexByName[it.name]=i end
-end
-
-local cpSlider            -- the ONE slider (persistent)
-local selectedName        -- string number of currently selected checkpoint
-local minN, maxN          -- numeric range snapshot for display only
-
-local function nearestExisting(num)
-    local down=num; while down>=0 do if cpIndexByName[tostring(down)] then return tostring(down) end down-=1 end
-    local up=num;   while up<=num+1000 do if cpIndexByName[tostring(up)] then return tostring(up)   end up+=1   end
+    table.sort(checkpoints, function(a,b) return tonumber(a.name) < tonumber(b.name) end)
+    for i, it in ipairs(checkpoints) do cpIndexByName[it.name] = i end
 end
 
 local function updateDetectedLabel()
-    local text = (#checkpoints>0) and ("Detected Checkpoints: "..table.concat(namesArray(), ", ")) or "No checkpoints yet."
-    if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end) else labelDetected = TPTab:CreateLabel(text) end
+    local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", "))
+                                   or ("No children under Workspace."..CP_FOLDER_NAME..".")
+    if labelDetected and labelDetected.Set then
+        pcall(function() labelDetected:Set(text) end)
+    else
+        labelDetected = TPTab:CreateLabel(text)
+    end
 end
 
--- Create the slider ONCE
-local function ensureSlider()
-    if cpSlider then return end
-    cpSlider = TPTab:CreateSlider({
-        Name = "Select checkpoint (number)",
-        Range = {0, 1},   -- dummy visual range; we manage validity ourselves
-        Increment = 1,
-        Suffix = "#",
-        CurrentValue = 0,
-        Callback = function(v)
-            -- clamp to nearest valid existing checkpoint
-            local nearest = nearestExisting(tonumber(v) or 0)
-            selectedName = nearest
+-- ========= Custom slider =========
+-- We build it once and only update its range/value on refresh.
+local sliderGui -- ScreenGui
+local sliderFrame -- outer frame
+local bar, fill, knob, title -- UI elements
+local sliderMin, sliderMax, sliderValue = 0, 1, 0  -- numeric values
+
+local function valueToX(val)
+    if sliderMax == sliderMin then return 0 end
+    local pct = (val - sliderMin) / (sliderMax - sliderMin)
+    return math.clamp(pct, 0, 1)
+end
+
+local function nearestExisting(num)
+    -- snap to closest detected CP (down preference, then up)
+    local bestName, bestDist
+    for _, cp in ipairs(checkpoints) do
+        local n = tonumber(cp.name)
+        local d = math.abs(n - num)
+        if not bestDist or d < bestDist then
+            bestDist, bestName = d, cp.name
         end
-    })
+    end
+    return bestName
 end
 
--- Refresh data and clamp the existing slider (no duplicates)
+local function setSliderDisplay(valNumber)
+    -- updates knob + fill + title label; does NOT change list
+    sliderValue = valNumber
+    local pct = valueToX(valNumber)
+    local barAbs = bar.AbsoluteSize.X
+    local x = bar.AbsolutePosition.X + pct * barAbs
+    -- position knob relative to bar
+    knob.Position = UDim2.fromOffset(bar.AbsolutePosition.X + pct * barAbs - sliderFrame.AbsolutePosition.X - knob.AbsoluteSize.X/2, knob.Position.Y.Offset)
+    fill.Size = UDim2.new(pct, 0, 1, 0)
+    title.Text = "Select checkpoint (number)   " .. tostring(valNumber) .. " #"
+end
+
+local function ensureCustomSlider()
+    if sliderGui then return end
+    local pg = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+    sliderGui = Instance.new("ScreenGui")
+    sliderGui.Name = "GN_CustomSlider"
+    sliderGui.ResetOnSpawn = false
+    sliderGui.IgnoreGuiInset = true
+    sliderGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sliderGui.Parent = pg
+
+    sliderFrame = Instance.new("Frame")
+    sliderFrame.Name = "SliderFrame"
+    sliderFrame.Size = UDim2.new(0, 420, 0, 64)
+    sliderFrame.Position = UDim2.new(0, 24, 1, -110)   -- bottom-left; tweak if you like
+    sliderFrame.BackgroundColor3 = Color3.fromRGB(20,20,20)
+    sliderFrame.BackgroundTransparency = 0.2
+    sliderFrame.BorderSizePixel = 0
+    sliderFrame.Parent = sliderGui
+
+    local corner = Instance.new("UICorner", sliderFrame); corner.CornerRadius = UDim.new(0, 14)
+
+    title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, -20, 0, 22)
+    title.Position = UDim2.new(0, 10, 0, 6)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamSemibold
+    title.TextSize = 16
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "Select checkpoint (number)"
+    title.TextColor3 = Color3.new(1,1,1)
+    title.Parent = sliderFrame
+
+    bar = Instance.new("Frame")
+    bar.Name = "Bar"
+    bar.Size = UDim2.new(1, -40, 0, 10)
+    bar.Position = UDim2.new(0, 20, 0, 40)
+    bar.BackgroundColor3 = Color3.fromRGB(50,50,50)
+    bar.BorderSizePixel = 0
+    bar.Parent = sliderFrame
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 6)
+
+    fill = Instance.new("Frame")
+    fill.Name = "Fill"
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.Position = UDim2.new(0, 0, 0, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(65, 139, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 6)
+
+    knob = Instance.new("Frame")
+    knob.Name = "Knob"
+    knob.Size = UDim2.new(0, 18, 0, 18)
+    knob.Position = UDim2.fromOffset(bar.AbsolutePosition.X - sliderFrame.AbsolutePosition.X - 9, 36)
+    knob.BackgroundColor3 = Color3.fromRGB(65, 139, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = sliderFrame
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local dragging = false
+
+    local function setFromX(xPixel)
+        -- xPixel in screen coords; convert to value
+        local left = bar.AbsolutePosition.X
+        local width = bar.AbsoluteSize.X
+        local pct = math.clamp((xPixel - left) / math.max(width,1), 0, 1)
+        local rawVal = sliderMin + pct * (sliderMax - sliderMin)
+        rawVal = math.floor(rawVal + 0.5) -- step = 1
+        if sliderMin == sliderMax then rawVal = sliderMin end
+        local snapName = nearestExisting(rawVal)
+        if snapName then
+            selectedName = snapName
+            setSliderDisplay(tonumber(snapName))
+        end
+    end
+
+    knob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+        end
+    end)
+    knob.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            setFromX((input.Position and input.Position.X) or UIS:GetMouseLocation().X)
+            dragging = true
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            setFromX((input.Position and input.Position.X) or UIS:GetMouseLocation().X)
+        end
+    end)
+end
+-- ========= end custom slider =========
+
+local function rebuildCustomSliderRange()
+    ensureCustomSlider()
+    -- derive min/max from detected numerics; if none, show a disabled state
+    local arr = {}
+    for _, cp in ipairs(checkpoints) do table.insert(arr, tonumber(cp.name)) end
+    table.sort(arr)
+    sliderMin, sliderMax = arr[1] or 0, arr[#arr] or 1
+    -- default to highest available
+    if #arr > 0 then
+        selectedName = tostring(arr[#arr])
+        setSliderDisplay(arr[#arr])
+    else
+        selectedName = nil
+        setSliderDisplay(0)
+    end
+end
+
 local function refreshUI()
+    if refreshDebounce then return end
+    refreshDebounce = true
+    task.delay(0.2, function() refreshDebounce = false end)
+
     collectCheckpoints()
     updateDetectedLabel()
-    ensureSlider()
+    rebuildCustomSliderRange()
 
-    -- recompute min/max for info and clamp selection
-    local nums = {}
-    for _,cp in ipairs(checkpoints) do table.insert(nums, tonumber(cp.name)) end
-    table.sort(nums)
-    minN, maxN = nums[1], nums[#nums]
-
-    -- set a safe default if none selected
-    if not selectedName and maxN then selectedName = tostring(maxN) end
-
-    -- try to keep slider's thumb near the selected number (visual only)
-    if maxN then
-        local ok = pcall(function()
-            -- some Rayfield sliders expose .Set; if not, the visual may not move—teleport still uses selectedName
-            if cpSlider and cpSlider.Set then cpSlider:Set(tonumber(selectedName) or maxN) end
-        end)
-    end
+    print("[CP children] "..(#checkpoints>0 and table.concat(namesArray(), ", ") or "(none)"))
 end
 
 -- Buttons
 TPTab:CreateButton({
-    Name="Teleport (selected)",
-    Callback=function()
-        if not selectedName then Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2}); return end
+    Name = "Teleport (selected)",
+    Callback = function()
+        if not selectedName then
+            Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2})
+            return
+        end
         local idx = cpIndexByName[selectedName]; if not idx then return end
-        local cp = checkpoints[idx]; local cf = tryResolveAnchorCF(cp.root)
-        if not cf then Rayfield:Notify({Title="No anchor", Content="No part inside checkpoint yet (streaming).", Duration=2}); return end
-        local _,hrp,hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        local cp = checkpoints[idx]
+        local cf = tryResolveAnchorCF(cp.root)
+        if not cf then
+            Rayfield:Notify({Title="No anchor yet", Content="No part inside '"..cp.name.."' (streaming?).", Duration=3})
+            return
+        end
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
         hrp.CFrame = cf * CFrame.new(0,5,0)
         Rayfield:Notify({Title="Teleported", Content="To "..selectedName, Duration=2})
     end
 })
 TPTab:CreateButton({
-    Name="Auto TP through all",
-    Callback=function()
-        local _,hrp,hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
-        for _,cp in ipairs(checkpoints) do
+    Name = "Auto TP through all",
+    Callback = function()
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        for _, cp in ipairs(checkpoints) do
             local cf = tryResolveAnchorCF(cp.root)
             if cf then hrp.CFrame = cf * CFrame.new(0,5,0); task.wait(1) end
         end
         Rayfield:Notify({Title="Auto TP Complete", Duration=3})
     end
 })
-TPTab:CreateButton({
-    Name="Refresh checkpoints",
-    Callback=function()
-        refreshUI()
-        Rayfield:Notify({Title="Refreshed", Content=(#checkpoints).." checkpoints", Duration=1})
-    end
-})
-TPTab:CreateButton({
-    Name="Reset to highest",
-    Callback=function()
-        if #checkpoints==0 then return end
-        selectedName = checkpoints[#checkpoints].name
-        if cpSlider and cpSlider.Set then pcall(function() cpSlider:Set(tonumber(selectedName)) end) end
-    end
-})
+TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
 
 -- Initial build
 refreshUI()
 
--- Optional: mobile/PC click-to-TP on actual checkpoint parts (kept for convenience)
-local function findOwnerUnderFolder(inst, folder)
-    local cur=inst; while cur and cur~=Workspace do if cur.Parent==folder then return cur end; cur=cur.Parent end; return nil
-end
-local function raycastFromScreen(p)
-    local cam=Workspace.CurrentCamera; local ur=cam:ViewportPointToRay(p.X, p.Y)
-    local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Blacklist; params.FilterDescendantsInstances={LP.Character}
-    return Workspace:Raycast(ur.Origin, ur.Direction*2000, params)
-end
-local touchConn; TPTab:CreateToggle({
-    Name="Tap-to-TP on checkpoints (mobile)", CurrentValue=false,
-    Callback=function(v)
-        if touchConn then touchConn:Disconnect(); touchConn=nil end
-        if not v then return end
-        touchConn = UIS.TouchTap:Connect(function(pos, processed)
-            if processed then return end
-            local r = raycastFromScreen(pos[1]); local folder = resolveFolder()
-            if r and r.Instance and folder then
-                local owner = findOwnerUnderFolder(r.Instance, folder)
-                if owner and cpIndexByName[owner.Name] then
-                    selectedName = owner.Name
-                    local cf = tryResolveAnchorCF(owner)
-                    if cf then local _,hrp,hum=getCharacter(); if hrp and hum and hum.Health>0 then hrp.CFrame = cf * CFrame.new(0,5,0) end end
-                end
+-- Watchers for exact folder (update when children under Checkpoints change)
+if folderConn then folderConn:Disconnect() end
+folderConn = Workspace.ChildAdded:Connect(function(child)
+    if child.Name == CP_FOLDER_NAME then
+        task.wait(0.05); refreshUI()
+        if folderChildConn then folderChildConn:Disconnect() end
+        folderChildConn = child.ChildAdded:Connect(function(ch)
+            if ch:IsA("Folder") or ch:IsA("Model") or ch:IsA("BasePart") then
+                task.wait(0.05); refreshUI()
             end
         end)
     end
-})
-
--- Visibility toggles
-local function addVisibilityToggle(tab) tab:CreateToggle({Name="Toggle GUI Visibility", CurrentValue=true, Callback=function(v) Rayfield:ToggleWindow(v) end}) end
-addVisibilityToggle(FlightTab); addVisibilityToggle(TPTab)
+end)
+local f = resolveFolder()
+if f then
+    if folderChildConn then folderChildConn:Disconnect() end
+    folderChildConn = f.ChildAdded:Connect(function(ch)
+        if ch:IsA("Folder") or ch:IsA("Model") or ch:IsA("BasePart") then
+            task.wait(0.05); refreshUI()
+        end
+    end)
+end
