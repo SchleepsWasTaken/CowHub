@@ -459,7 +459,7 @@ TPTab:CreateButton({
         local num = _G.__GN_SelectedNumeric
         if not num then Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2}); return end
         selectedName = tostring(num)
-        local cf = awaitAnchorCF(selectedName, 2.0)
+        local cf = awaitAnchorCF(selectedName, 4.0)
         if not cf then Rayfield:Notify({Title="No anchor", Content="No part in '"..selectedName.."' yet (streaming).", Duration=2}); return end
         local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
         hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..selectedName, Duration=2})
