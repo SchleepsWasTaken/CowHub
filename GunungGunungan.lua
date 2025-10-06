@@ -1,6 +1,6 @@
 -- Gunung Nomaly Utility GUI
--- Fly mode + checkpoint teleports + optional tap-to-teleport on checkpoints
--- Works on Delta/Xeno executors and Roblox Studio test (LocalScript)
+-- Fly + Noclip + Checkpoint TP (dropdown) + Tap/Click TP
+-- Optimized: guarded waits, deduped connections, no UI growth, safe refresh
 -- UI by Rayfield: https://sirius.menu/rayfield
 
 --// Load Rayfield
@@ -19,32 +19,48 @@ local FlightTab = Window:CreateTab("Flight Controls", 1103511846)
 local TPTab    = Window:CreateTab("Checkpoint Teleports", 1103511847)
 
 --// Services & locals
-local Players   = game:GetService("Players")
-local RunService= game:GetService("RunService")
-local UIS       = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local UIS         = game:GetService("UserInputService")
+local Workspace   = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
+
+-- Utility: bounded WaitForChild
+local function SafeWait(parent, name, timeout)
+    local obj = parent:FindFirstChild(name)
+    if obj then return obj end
+    local ok, res = pcall(function()
+        return parent:WaitForChild(name, timeout or 5)
+    end)
+    if ok then return res end
+    return nil
+end
 
 -- Character refs (safe getters)
 local function getCharacter()
     local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hrp  = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart")
-    local hum  = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid")
+    local hrp  = char:FindFirstChild("HumanoidRootPart") or SafeWait(char, "HumanoidRootPart", 5)
+    local hum  = char:FindFirstChildOfClass("Humanoid") or SafeWait(char, "Humanoid", 5)
     return char, hrp, hum
 end
 
 -- Refs that update on respawn
 local Character, HRP, Humanoid = getCharacter()
+
+-- forward decls
+local enableNoclip
+local noclipOn  = false
+local noclipConn = nil
+
 LocalPlayer.CharacterAdded:Connect(function(c)
     Character = c
-    HRP = c:WaitForChild("HumanoidRootPart")
-    Humanoid = c:WaitForChild("Humanoid")
-    -- stop fly/noclip on respawn just in case
+    HRP = SafeWait(c, "HumanoidRootPart", 5)
+    Humanoid = SafeWait(c, "Humanoid", 5)
     pcall(function()
         if Humanoid then Humanoid.PlatformStand = false end
     end)
     if noclipConn then noclipConn:Disconnect() noclipConn = nil end
-    if noclipOn then enableNoclip(true) end
+    if noclipOn and enableNoclip then enableNoclip(true) end
 end)
 
 -- ====================
@@ -72,34 +88,25 @@ local function startFlying()
     gyro.D = 500
     gyro.Parent = HRP
 
-    -- control loop
     task.spawn(function()
         local cam = Workspace.CurrentCamera
         while isFlying and HRP and Humanoid and Humanoid.Health > 0 do
             local move = Vector3.new()
             local cf = cam.CFrame
-
             if UIS:IsKeyDown(Enum.KeyCode.W) then move += cf.LookVector end
             if UIS:IsKeyDown(Enum.KeyCode.S) then move -= cf.LookVector end
             if UIS:IsKeyDown(Enum.KeyCode.A) then move -= cf.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.D) then move += cf.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0,1,0) end
             if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move -= Vector3.new(0,1,0) end
-
-            if move.Magnitude > 0 then
-                move = move.Unit * flySpeed
-            end
-
+            if move.Magnitude > 0 then move = move.Unit * flySpeed end
             vel.Velocity = move
-            -- Orient the body to face camera forward (correct CFrame uses world position target)
             local pos = HRP.Position
             gyro.CFrame = CFrame.new(pos, pos + cf.LookVector)
-
             RunService.Heartbeat:Wait()
         end
     end)
-
-    Rayfield:Notify({ Title = "Flying Enabled", Content = "Use WASD/Space/Shift.", Duration = 3 })
+    Rayfield:Notify({ Title = "Flying Enabled", Content = "Use WASD/Space/Shift.", Duration = 2 })
 end
 
 local function stopFlying()
@@ -108,22 +115,30 @@ local function stopFlying()
     if vel then vel:Destroy() vel = nil end
     if gyro then gyro:Destroy() gyro = nil end
     if Humanoid then Humanoid.PlatformStand = false end
-    Rayfield:Notify({ Title = "Flying Disabled", Content = "Flight off.", Duration = 3 })
+    Rayfield:Notify({ Title = "Flying Disabled", Content = "Flight off.", Duration = 2 })
 end
 
--- Noclip (NEW)
+-- Keybind: toggle fly with F
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.F then
+        if isFlying then
+            stopFlying(); Rayfield:Notify({Title="Fly", Content="Off (F)", Duration=1})
+        else
+            startFlying(); Rayfield:Notify({Title="Fly", Content="On (F)", Duration=1})
+        end
+    end
+end)
+
+-- Noclip
 local function setCharacterCollide(on)
     if not Character then return end
     for _, d in ipairs(Character:GetDescendants()) do
-        if d:IsA("BasePart") then
-            d.CanCollide = on
-        end
+        if d:IsA("BasePart") then d.CanCollide = on end
     end
 end
 
-noclipOn = false
-noclipConn = nil
-function enableNoclip(on)
+enableNoclip = function(on)
     noclipOn = on
     if noclipConn then noclipConn:Disconnect() noclipConn = nil end
     if on then
@@ -136,47 +151,17 @@ function enableNoclip(on)
 end
 
 -- UI controls for fly + noclip
-FlightTab:CreateToggle({
-    Name = "Toggle Fly",
-    CurrentValue = false,
-    Callback = function(v)
-        if v then startFlying() else stopFlying() end
-    end
-})
-
-FlightTab:CreateSlider({
-    Name = "Fly Speed",
-    Range = {10, MAX_SPEED},
-    Increment = 5,
-    Suffix = "speed",
-    CurrentValue = flySpeed,
-    Callback = function(v)
-        flySpeed = v
-        Rayfield:Notify({ Title = "Speed Updated", Content = "Fly speed = "..v, Duration = 2 })
-    end
-})
-
-FlightTab:CreateToggle({
-    Name = "Noclip (no collisions)",
-    CurrentValue = false,
-    Callback = function(v)
-        enableNoclip(v)
-        Rayfield:Notify({ Title = v and "Noclip ON" or "Noclip OFF", Content = v and "Collisions disabled" or "Collisions restored", Duration = 2 })
-    end
-})
-
+FlightTab:CreateToggle({ Name = "Toggle Fly", CurrentValue = false, Callback = function(v) if v then startFlying() else stopFlying() end end })
+FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment = 5, Suffix = "speed", CurrentValue = flySpeed, Callback = function(v) flySpeed = v end })
+FlightTab:CreateToggle({ Name = "Noclip (no collisions)", CurrentValue = false, Callback = function(v) enableNoclip(v) end })
 FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 
--- Ensure fly stops if character dies
 if Humanoid then
-    Humanoid.Died:Connect(function()
-        stopFlying()
-        enableNoclip(false)
-    end)
+    Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end)
 end
 
 -- ====================
--- Checkpoint detection (numeric names + Summit) WITH DROPDOWN UI (no infinite scroll)
+-- Checkpoint detection (numeric names + Summit) WITH DROPDOWN UI
 -- ====================
 local checkpoints = {} -- { name=string, root=Instance, getCFrame=function():CFrame }
 local cpIndexByName = {}
@@ -186,8 +171,11 @@ local selectedName
 local CP_FOLDER_NAME = "Checkpoints"
 local CheckpointsFolder
 
+local folderConn, folderChildConn
+local refreshDebounce = false
+
 local function resolveFolder()
-    CheckpointsFolder = Workspace:FindFirstChild(CP_FOLDER_NAME)
+    CheckpointsFolder = Workspace:FindFirstChild(CP_FOLDER_NAME) or SafeWait(Workspace, CP_FOLDER_NAME, 10)
     return CheckpointsFolder
 end
 
@@ -198,8 +186,7 @@ local function buildCheckpointEntry(child)
     elseif child:IsA("Model") then
         entry.getCFrame = function()
             if child.PrimaryPart then return child.PrimaryPart.CFrame end
-            local cf = child:GetBoundingBox()
-            return cf
+            local cf = child:GetBoundingBox(); return cf
         end
     else
         entry.getCFrame = function() return child:GetPivot() end
@@ -208,160 +195,92 @@ local function buildCheckpointEntry(child)
 end
 
 local function collectCheckpoints()
-    checkpoints = {}
-    cpIndexByName = {}
-    local folder = resolveFolder()
-    if folder then
-        for _, child in ipairs(folder:GetChildren()) do
-            if child:IsA("BasePart") or child:IsA("Model") then
-                local e = buildCheckpointEntry(child)
-                table.insert(checkpoints, e)
-            end
+    checkpoints = {}; cpIndexByName = {}
+    local folder = resolveFolder(); if not folder then return end
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("BasePart") or child:IsA("Model") then
+            table.insert(checkpoints, buildCheckpointEntry(child))
         end
     end
-    -- Sort: numeric asc, then alpha, Summit last
     for _, it in ipairs(checkpoints) do
         local n = tonumber(it.name)
         local lower = string.lower(it.name)
         local summit = (lower == "summit")
-        if summit then
-            it._group, it._key = 2, math.huge
-        elseif n then
-            it._group, it._key = 0, n
-        else
-            it._group, it._key = 1, lower
-        end
+        if summit then it._group, it._key = 2, math.huge
+        elseif n then it._group, it._key = 0, n
+        else it._group, it._key = 1, lower end
     end
-    table.sort(checkpoints, function(a,b)
-        if a._group ~= b._group then return a._group < b._group end
-        return a._key < b._key
-    end)
+    table.sort(checkpoints, function(a,b) if a._group ~= b._group then return a._group < b._group end return a._key < b._key end)
     for i, it in ipairs(checkpoints) do cpIndexByName[it.name] = i end
 end
 
-local function namesList()
-    local t = {}
-    for i, cp in ipairs(checkpoints) do t[i] = cp.name end
-    return t
+local function namesArray()
+    local t = {}; for i, cp in ipairs(checkpoints) do t[i] = cp.name end; return t
 end
 
 local function updateDetectedLabel()
-    local text
-    if #checkpoints > 0 then
-        text = "Detected Checkpoints: " .. table.concat(namesList(), ", ")
-    else
-        text = "No checkpoints found in Workspace."..CP_FOLDER_NAME
-    end
-    if labelDetected and labelDetected.Set then
-        pcall(function() labelDetected:Set(text) end)
-    else
-        labelDetected = TPTab:CreateLabel(text)
-    end
+    local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", ")) or ("No checkpoints found in Workspace."..CP_FOLDER_NAME)
+    if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end) else labelDetected = TPTab:CreateLabel(text) end
 end
 
--- Build/refresh the dropdown UI
 local function rebuildDropdownUI()
-    local options = namesList()
+    local options = namesArray()
     if dropdown and dropdown.Set then
-        pcall(function()
-            dropdown:Set(options)
-        end)
-    else
+        local ok = pcall(function() dropdown:Set(options) end)
+        if not ok then dropdown = nil end
+    end
+    if not dropdown then
         dropdown = TPTab:CreateDropdown({
             Name = "Choose checkpoint",
             Options = options,
             CurrentOption = options[1],
             Multiple = false,
             Callback = function(opt)
-                -- Rayfield may pass a string or a table with one string
                 if typeof(opt) == "table" then opt = opt[1] end
                 selectedName = opt
             end
         })
     end
-    if options[1] and not selectedName then selectedName = options[1] end
+    if options[1] then selectedName = options[1] end
 end
 
--- Teleport helpers
-local function teleportToByName(name)
-    local idx = cpIndexByName[name]
-    if not idx then return end
-    local cp = checkpoints[idx]
-    local _, hrp, hum = getCharacter()
-    if not (hrp and hum and hum.Health > 0) then
-        Rayfield:Notify({ Title = "Error", Content = "Player not ready", Duration = 2 })
-        return
-    end
-    hrp.CFrame = cp.getCFrame() * CFrame.new(0, 5, 0)
-    Rayfield:Notify({ Title = "Teleported", Content = "To "..cp.name, Duration = 2 })
+local function refreshUI()
+    if refreshDebounce then return end
+    refreshDebounce = true
+    task.delay(0.25, function() refreshDebounce = false end)
+    collectCheckpoints(); updateDetectedLabel(); rebuildDropdownUI()
+    print("[CP order] "..table.concat(namesArray(), ", "))
 end
 
 -- Static buttons (operate on dropdown selection)
-TPTab:CreateButton({
-    Name = "Teleport (selected)",
-    Callback = function()
-        if selectedName then teleportToByName(selectedName) end
-    end
-})
+TPTab:CreateButton({ Name = "Teleport (selected)", Callback = function() if selectedName then local idx = cpIndexByName[selectedName]; if idx then local cp = checkpoints[idx]; local _, hrp, hum = getCharacter(); if hrp and hum and hum.Health > 0 then hrp.CFrame = cp.getCFrame() * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..cp.name, Duration=2}) end end end end })
 
-TPTab:CreateButton({
-    Name = "Auto TP through all",
-    Callback = function()
-        local _, hrp, hum = getCharacter()
-        if not (hrp and hum and hum.Health > 0) then
-            Rayfield:Notify({ Title = "Error", Content = "Player not ready", Duration = 2 })
-            return
-        end
-        for _, cp in ipairs(checkpoints) do
-            if not hum or hum.Health <= 0 then break end
-            hrp.CFrame = cp.getCFrame() * CFrame.new(0, 5, 0)
-            task.wait(1)
-        end
-        Rayfield:Notify({ Title = "Auto TP Complete", Content = "Visited all checkpoints", Duration = 3 })
-    end
-})
+TPTab:CreateButton({ Name = "Auto TP through all", Callback = function() local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health > 0) then Rayfield:Notify({ Title = "Error", Content = "Player not ready", Duration = 2 }); return end; for _, cp in ipairs(checkpoints) do if not hum or hum.Health <= 0 then break end; hrp.CFrame = cp.getCFrame() * CFrame.new(0, 5, 0); task.wait(1) end; Rayfield:Notify({ Title = "Auto TP Complete", Content = "Visited all checkpoints", Duration = 3 }) end })
 
-TPTab:CreateButton({
-    Name = "Refresh checkpoints",
-    Callback = function()
-        collectCheckpoints()
-        updateDetectedLabel()
-        rebuildDropdownUI()
-    end
-})
+TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
 
 -- Initial build
-collectCheckpoints()
-updateDetectedLabel()
-rebuildDropdownUI()
+refreshUI()
 
--- Watchers (no duplication, just refresh dropdown)
-Workspace.ChildAdded:Connect(function(child)
+-- Watchers (deduped)
+if folderConn then folderConn:Disconnect() end
+folderConn = Workspace.ChildAdded:Connect(function(child)
     if child.Name == CP_FOLDER_NAME then
         CheckpointsFolder = child
-        task.wait(0.05)
-        collectCheckpoints()
-        updateDetectedLabel()
-        rebuildDropdownUI()
+        task.wait(0.05); refreshUI()
+        if folderChildConn then folderChildConn:Disconnect() end
+        folderChildConn = child.ChildAdded:Connect(function(ch) if ch:IsA("BasePart") or ch:IsA("Model") then task.wait(0.05); refreshUI() end end)
     end
 end)
 
-local function startFolderWatch()
-    local folder = resolveFolder()
-    if not folder then return end
-    folder.ChildAdded:Connect(function(ch)
-        if ch:IsA("BasePart") or ch:IsA("Model") then
-            task.wait(0.05)
-            collectCheckpoints()
-            updateDetectedLabel()
-            rebuildDropdownUI()
-        end
-    end)
+local folder = resolveFolder()
+if folder then
+    if folderChildConn then folderChildConn:Disconnect() end
+    folderChildConn = folder.ChildAdded:Connect(function(ch) if ch:IsA("BasePart") or ch:IsA("Model") then task.wait(0.05); refreshUI() end end)
 end
-startFolderWatch()
 
 -- ====================
--- Tap-to-teleport (checkpoint-aware, works with Models too)
+-- Tap-to-teleport (mobile) + Click-to-teleport (PC)
 -- ====================
 local function raycastFromScreen(screenPos)
     local cam = Workspace.CurrentCamera
@@ -373,52 +292,63 @@ local function raycastFromScreen(screenPos)
     return Workspace:Raycast(unitRay.Origin, unitRay.Direction * 2000, rayParams)
 end
 
-TPTab:CreateToggle({
-    Name = "Tap-to-TP on checkpoints (mobile)",
-    CurrentValue = false,
-    Callback = function(value)
-        if touchConn then touchConn:Disconnect() touchConn = nil end
-        if value then
-            touchConn = UIS.TouchTap:Connect(function(pos, processed)
-                if processed then return end
-                local r = raycastFromScreen(pos[1])
-                if r and r.Instance then
-                    -- Find owning checkpoint by ancestry
-                    local inst = r.Instance
-                    while inst and inst ~= Workspace do
-                        if CheckpointsFolder and inst.Parent == CheckpointsFolder then break end
-                        inst = inst.Parent
-                    end
-                    if inst and cpIndexByName[inst.Name] then
-                        teleportToByName(inst.Name)
-                    end
-                end
-            end)
-            Rayfield:Notify({ Title = "Tap-TP Enabled", Content = "Tap a checkpoint to teleport.", Duration = 3 })
-        else
-            Rayfield:Notify({ Title = "Tap-TP Disabled", Content = "Tap teleport off.", Duration = 3 })
-        end
+local touchConn, mouseClickConn
+
+local function findCheckpointAncestor(inst)
+    local folder = CheckpointsFolder or resolveFolder(); if not folder then return nil end
+    local cur = inst
+    while cur and cur ~= Workspace do
+        if cur.Parent == folder then return cur end
+        cur = cur.Parent
     end
-})
+    return nil
+end
+
+TPTab:CreateToggle({ Name = "Tap-to-TP on checkpoints (mobile)", CurrentValue = false, Callback = function(value)
+    if touchConn then touchConn:Disconnect() touchConn = nil end
+    if value then
+        touchConn = UIS.TouchTap:Connect(function(pos, processed)
+            if processed then return end
+            local r = raycastFromScreen(pos[1])
+            if r and r.Instance then
+                local owner = findCheckpointAncestor(r.Instance)
+                if owner and cpIndexByName[owner.Name] then teleportToByName(owner.Name) end
+            end
+        end)
+        Rayfield:Notify({ Title = "Tap-TP Enabled", Content = "Tap a checkpoint to teleport.", Duration = 2 })
+    else
+        Rayfield:Notify({ Title = "Tap-TP Disabled", Content = "Tap teleport off.", Duration = 2 })
+    end
+end })
+
+TPTab:CreateToggle({ Name = "Click-to-TP on checkpoints (PC)", CurrentValue = false, Callback = function(enable)
+    if mouseClickConn then mouseClickConn:Disconnect(); mouseClickConn = nil end
+    if not enable then return end
+    mouseClickConn = UIS.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local pos = UIS:GetMouseLocation()
+            local cam = Workspace.CurrentCamera
+            local ur = cam:ViewportPointToRay(pos.X, pos.Y)
+            local params = RaycastParams.new(); params.FilterType = Enum.RaycastFilterType.Blacklist; params.FilterDescendantsInstances = { LocalPlayer.Character }
+            local r = Workspace:Raycast(ur.Origin, ur.Direction * 2000, params)
+            if r and r.Instance then
+                local owner = findCheckpointAncestor(r.Instance)
+                if owner and cpIndexByName[owner.Name] then teleportToByName(owner.Name) end
+            end
+        end
+    end)
+end })
 
 -- ====================
 -- Window visibility toggles
 -- ====================
 local function addVisibilityToggle(tab)
-    tab:CreateToggle({
-        Name = "Toggle GUI Visibility",
-        CurrentValue = true,
-        Callback = function(v) Rayfield:ToggleWindow(v) end
-    })
+    tab:CreateToggle({ Name = "Toggle GUI Visibility", CurrentValue = true, Callback = function(v) Rayfield:ToggleWindow(v) end })
 end
-addVisibilityToggle(FlightTab)
-addVisibilityToggle(TPTab)
+addVisibilityToggle(FlightTab); addVisibilityToggle(TPTab)
 
 -- Debug print once
-if #checkpoints > 0 then
-    print("[Checkpoints] "..table.concat(namesList(), ", "))
-else
-    print("[Checkpoints] none found")
-end
+if #checkpoints > 0 then print("[Checkpoints] "..table.concat(namesArray(), ", ")) else print("[Checkpoints] none found") end
 
 -- Done
