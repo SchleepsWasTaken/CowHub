@@ -157,10 +157,10 @@ FlightTab:CreateToggle({ Name = "Noclip (no collisions)", CurrentValue = false, 
 FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 
 ----------------------------------------------------------------------
--- Checkpoints + caching
+-- Checkpoints + caching  (names + positions)  << DROP-IN REPLACEMENT
 ----------------------------------------------------------------------
 local CP_FOLDER_NAME = "Checkpoints"
-local checkpoints = {}      -- { {name="10", root=Instance}, ... } numeric only
+local checkpoints = {}      -- { {name="10", root=Instance}, ... } numeric only (root may be nil if not streamed)
 local cpIndexByName = {}    -- name -> index
 local selectedName          -- string number
 local labelDetected
@@ -173,93 +173,269 @@ local FS = {
     path = "GN_checkpoints.json"
 }
 
+local cachedNames = {}          -- array of strings
+local cachedPos   = {}          -- map: name -> {x=..,y=..,z=..}
+
 local function isNumericName(n) return string.match(n, "^%d+$") ~= nil end
 local function resolveFolder() return Workspace:FindFirstChild(CP_FOLDER_NAME) end
 
+-- ---------- load/save cache (names + positions) ----------
+local function loadCache()
+    if not FS.has or not isfile(FS.path) then return end
+    local ok, content = pcall(function() return readfile(FS.path) end)
+    if not ok or not content or content=="" then return end
+    local ok2, obj = pcall(function() return game:GetService("HttpService"):JSONDecode(content) end)
+    if not ok2 or type(obj)~="table" then return end
+    cachedNames = {}
+    if type(obj.names)=="table" then
+        for _,v in ipairs(obj.names) do
+            v = tostring(v)
+            if isNumericName(v) then table.insert(cachedNames, v) end
+        end
+    end
+    cachedPos = {}
+    if type(obj.positions)=="table" then
+        for k,v in pairs(obj.positions) do
+            if isNumericName(k) and type(v)=="table" and v.x and v.y and v.z then
+                cachedPos[k] = {x=tonumber(v.x), y=tonumber(v.y), z=tonumber(v.z)}
+            end
+        end
+    end
+end
+local function saveCache()
+    if not FS.has then return end
+    local Http = game:GetService("HttpService")
+    local ok, enc = pcall(function() return Http:JSONEncode({names=cachedNames, positions=cachedPos, savedAt=os.time()}) end)
+    if ok then pcall(function() writefile(FS.path, enc) end) end
+end
+
+loadCache()
+
+-- ---------- utilities ----------
 local function namesArray()
     local t = {}
     for i, cp in ipairs(checkpoints) do t[i] = cp.name end
     return t
 end
-
 local function sortAndIndex(byNames)
     table.sort(byNames, function(a,b) return tonumber(a) < tonumber(b) end)
     checkpoints, cpIndexByName = {}, {}
     local folder = resolveFolder()
     for _, name in ipairs(byNames) do
-        local root = folder and folder:FindFirstChild(name)
+        local root = folder and folder:FindFirstChild(name) or nil
         table.insert(checkpoints, {name=name, root=root})
         cpIndexByName[name] = #checkpoints
     end
 end
-
--- load cache -> returns { "1","2",... } or nil
-local function loadCache()
-    if not FS.has or not isfile(FS.path) then return nil end
-    local ok, content = pcall(function() return readfile(FS.path) end)
-    if not ok or not content or content == "" then return nil end
-    local ok2, obj = pcall(function() return HttpService:JSONDecode(content) end)
-    if not ok2 or type(obj)~="table" or type(obj.names)~="table" then return nil end
-    local out = {}
-    for _,v in ipairs(obj.names) do if isNumericName(tostring(v)) then table.insert(out, tostring(v)) end end
-    if #out==0 then return nil end
-    return out
-end
-
-local function saveCacheFromCurrent()
-    if not FS.has then return false end
-    local names = namesArray()
-    local ok, enc = pcall(function() return HttpService:JSONEncode({names=names, savedAt=os.time()}) end)
-    if not ok then return false end
-    local ok2 = pcall(function() writefile(FS.path, enc) end)
-    if ok2 then Rayfield:Notify({Title="Saved", Content="Checkpoint list cached", Duration=2}) end
-    return ok2
-end
-
--- world scan -> returns set of names
-local function scanWorldNames()
-    local ret = {}
-    local folder = resolveFolder(); if not folder then return ret end
-    for _, child in ipairs(folder:GetChildren()) do
-        if (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) and isNumericName(child.Name) then
-            table.insert(ret, child.Name)
-        end
-    end
-    return ret
-end
-
--- union cached+world names
-local function unionNames(a, b)
-    local set, out = {}, {}
-    for _,v in ipairs(a or {}) do v=tostring(v); if not set[v] then set[v]=true; table.insert(out,v) end end
-    for _,v in ipairs(b or {}) do v=tostring(v); if not set[v] then set[v]=true; table.insert(out,v) end end
-    return out
-end
-
--- anchor finder
-local function tryResolveAnchorCF(rootOrName)
-    local root = rootOrName
-    if typeof(rootOrName)=="string" then
-        local folder = resolveFolder()
-        root = folder and folder:FindFirstChild(rootOrName)
-    end
-    if not root then return nil end
-    if root:IsA("BasePart") then return root.CFrame end
-    if root:IsA("Model") then
-        if root.PrimaryPart then return root.PrimaryPart.CFrame end
-        local cf = root:GetBoundingBox(); return cf
-    end
-    for _, d in ipairs(root:GetDescendants()) do
-        if d:IsA("BasePart") then return d.CFrame end
-    end
-    return nil
-end
-
--- label
 local function updateDetectedLabel()
     local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", ")) or "No checkpoints yet."
     if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end)
     else labelDetected = TPTab:CreateLabel(text) end
+end
+
+-- ---------- robust anchor resolver with streaming + heuristics ----------
+local function getOwnerByName(name)
+    local folder = resolveFolder()
+    return folder and folder:FindFirstChild(name) or nil
+end
+local function gatherParts(owner)
+    local parts = {}
+    if not owner then return parts end
+    if owner:IsA("BasePart") then return {owner} end
+    for _, d in ipairs(owner:GetDescendants()) do
+        if d:IsA("BasePart") then table.insert(parts, d) end
+    end
+    return parts
+end
+local function chooseBestCFrame(parts)
+    -- drop parts at/near origin to avoid spawn snaps
+    local filtered = {}
+    for _, p in ipairs(parts) do
+        if p.Position.Magnitude > 5 then table.insert(filtered, p) end
+    end
+    if #filtered == 0 then return nil end
+    -- prefer names that look like pads/touch/flag
+    local preferred = {"touch","checkpoint","flag","pad","spawn"}
+    for _, p in ipairs(filtered) do
+        local n = string.lower(p.Name)
+        for _, key in ipairs(preferred) do
+            if string.find(n, key, 1, true) then
+                return p.CFrame
+            end
+        end
+    end
+    -- otherwise pick part closest to centroid
+    local sum = Vector3.new()
+    for _, p in ipairs(filtered) do sum += p.Position end
+    local center = sum / #filtered
+    local best, bestDist
+    for _, p in ipairs(filtered) do
+        local d = (p.Position - center).Magnitude
+        if not bestDist or d < bestDist then bestDist, best = d, p end
+    end
+    return best and best.CFrame or nil
+end
+local function awaitAnchorCF(name, timeout)
+    -- 1) if we have a cached position, use it immediately
+    local pos = cachedPos[name]
+    if pos then return CFrame.new(pos.x, pos.y, pos.z) end
+
+    -- 2) otherwise, wait briefly for streaming and derive a good CF
+    local t0 = time()
+    timeout = timeout or 2.0
+    repeat
+        local owner = getOwnerByName(name)
+        if owner then
+            local parts = gatherParts(owner)
+            if #parts > 0 then
+                local cf = chooseBestCFrame(parts)
+                if cf then
+                    -- record for next time
+                    cachedPos[name] = {x=cf.X, y=cf.Y, z=cf.Z}
+                    saveCache()
+                    return cf
+                end
+            end
+        end
+        task.wait(0.1)
+    until time() - t0 > timeout
+
+    return nil
+end
+
+-- ---------- scan + merge names (cache + world) ----------
+local function scanWorldNames()
+    local out = {}
+    local folder = resolveFolder(); if not folder then return out end
+    for _, child in ipairs(folder:GetChildren()) do
+        if (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) and isNumericName(child.Name) then
+            table.insert(out, child.Name)
+        end
+    end
+    return out
+end
+local function unionNames(a, b)
+    local set, out = {}, {}
+    for _,v in ipairs(a or {}) do v=tostring(v); if isNumericName(v) and not set[v] then set[v]=true; table.insert(out,v) end end
+    for _,v in ipairs(b or {}) do v=tostring(v); if isNumericName(v) and not set[v] then set[v]=true; table.insert(out,v) end end
+    return out
+end
+
+-- ---------- slider UI (custom; already created earlier in your script) ----------
+-- (we keep using the same sliderGui/controls you already have in your file)
+-- just reusing: sliderGui, sliderFrame, bar, fill, knob, title, sliderMin/Max/value, setSliderDisplay(), ensureCustomSlider()
+
+local cacheOnly = false  -- toggle: use only cached names (skip world scan)
+
+local function rebuildSliderRange()
+    ensureCustomSlider()
+    local arr = {}
+    for _, cp in ipairs(checkpoints) do table.insert(arr, tonumber(cp.name)) end
+    table.sort(arr)
+    sliderMin, sliderMax = arr[1] or 0, arr[#arr] or 1
+    if #arr > 0 then
+        selectedName = tostring(arr[#arr])      -- default to highest
+        setSliderDisplay(arr[#arr])
+    else
+        selectedName = nil
+        setSliderDisplay(0)
+    end
+end
+
+local function refreshUI()
+    if refreshDebounce then return end
+    refreshDebounce = true
+    task.delay(0.2, function() refreshDebounce = false end)
+
+    local world = cacheOnly and {} or scanWorldNames()
+    -- merge cache.names + world
+    local merged = unionNames(cachedNames, world)
+    local grew = (#merged > #cachedNames)
+    cachedNames = merged
+    sortAndIndex(cachedNames)
+    updateDetectedLabel()
+    rebuildSliderRange()
+    if grew then saveCache() end
+
+    print("[CP] " .. (#checkpoints > 0 and table.concat(namesArray(), ", ") or "(none)"))
+end
+
+-- ---------- buttons (use awaitAnchorCF so it works even when far away) ----------
+TPTab:CreateButton({
+    Name = "Teleport (selected)",
+    Callback = function()
+        if not selectedName then Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2}); return end
+        local cf = awaitAnchorCF(selectedName, 2.0)
+        if not cf then Rayfield:Notify({Title="No anchor", Content="No part in '"..selectedName.."' yet (streaming).", Duration=2}); return end
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..selectedName, Duration=2})
+    end
+})
+TPTab:CreateButton({
+    Name = "Auto TP through all (and save positions)",
+    Callback = function()
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        for _, cp in ipairs(checkpoints) do
+            local name = cp.name
+            local cf = awaitAnchorCF(name, 2.0)
+            if cf then
+                hrp.CFrame = cf * CFrame.new(0,5,0)
+                -- ensure we keep the position cached
+                cachedPos[name] = {x=cf.X, y=cf.Y, z=cf.Z}
+                saveCache()
+                task.wait(1)
+            else
+                warn("[AutoTP] Skipped "..name.." (not streamed and no cached position)")
+            end
+        end
+        Rayfield:Notify({Title="Auto TP Complete", Duration=3})
+    end
+})
+TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
+
+TPTab:CreateToggle({
+    Name = "Cache only (skip world scan)",
+    CurrentValue = false,
+    Callback = function(v) cacheOnly = v; refreshUI() end
+})
+TPTab:CreateButton({
+    Name = "Save cache now",
+    Callback = function() saveCache(); Rayfield:Notify({Title="Saved", Content="Names & positions cached", Duration=2}) end
+})
+TPTab:CreateButton({
+    Name = "Clear cache",
+    Callback = function()
+        if FS.has and isfile(FS.path) then pcall(function() writefile(FS.path, game:GetService('HttpService'):JSONEncode({names={}, positions={}})) end) end
+        cachedNames, cachedPos = {}, {}
+        refreshUI()
+        Rayfield:Notify({Title="Cleared", Content="Checkpoint cache cleared", Duration=2})
+    end
+})
+
+-- initial build
+refreshUI()
+
+-- update when the folder/children change
+if folderConn then folderConn:Disconnect() end
+folderConn = Workspace.ChildAdded:Connect(function(ch)
+    if ch.Name == CP_FOLDER_NAME then
+        task.wait(0.05); refreshUI()
+        if folderChildConn then folderChildConn:Disconnect() end
+        folderChildConn = ch.ChildAdded:Connect(function(c2)
+            if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
+                task.wait(0.05); refreshUI()
+            end
+        end)
+    end
+end)
+local f = resolveFolder()
+if f then
+    if folderChildConn then folderChildConn:Disconnect() end
+    folderChildConn = f.ChildAdded:Connect(function(c2)
+        if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
+            task.wait(0.05); refreshUI()
+        end
+    end)
 end
 
 ----------------------------------------------------------------------
