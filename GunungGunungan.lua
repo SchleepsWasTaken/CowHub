@@ -1,10 +1,37 @@
 -- Gunung Nomaly Utility GUI
 -- Fly + Noclip + Checkpoint TP (dropdown) + Tap/Click TP
--- Optimized: guarded waits, deduped connections, no UI growth, safe refresh
+-- Safe Rayfield loader for Studio/executors, robust checkpoint discovery
 -- UI by Rayfield: https://sirius.menu/rayfield
 
---// Load Rayfield
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+--// SAFE RAYFIELD LOADER (works with executors and Studio)
+local Rayfield
+-- Try remote loader (executors)
+do
+    local okGet, src = pcall(game.HttpGet, game, "https://sirius.menu/rayfield")
+    if okGet and typeof(loadstring) == "function" then
+        local fn = loadstring(src)
+        if fn then
+            local okRun, lib = pcall(fn)
+            if okRun and type(lib) == "table" and lib.CreateWindow then
+                Rayfield = lib
+            end
+        end
+    end
+end
+-- Fallback to local module (Studio-friendly)
+if not Rayfield then
+    local RS = game:GetService("ReplicatedStorage")
+    local okRequire, lib = pcall(function()
+        return require(RS:WaitForChild("Rayfield", 5))
+    end)
+    if okRequire and type(lib) == "table" and lib.CreateWindow then
+        Rayfield = lib
+    end
+end
+if not Rayfield then
+    warn("[Rayfield] Could not load. In Studio, insert a ModuleScript named 'Rayfield' in ReplicatedStorage and require it.")
+    return
+end
 
 --// Window
 local Window = Rayfield:CreateWindow({
@@ -122,11 +149,8 @@ end
 UIS.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.F then
-        if isFlying then
-            stopFlying(); Rayfield:Notify({Title="Fly", Content="Off (F)", Duration=1})
-        else
-            startFlying(); Rayfield:Notify({Title="Fly", Content="On (F)", Duration=1})
-        end
+        if isFlying then stopFlying(); Rayfield:Notify({Title="Fly", Content="Off (F)", Duration=1})
+        else startFlying(); Rayfield:Notify({Title="Fly", Content="On (F)", Duration=1}) end
     end
 end)
 
@@ -156,39 +180,33 @@ FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment 
 FlightTab:CreateToggle({ Name = "Noclip (no collisions)", CurrentValue = false, Callback = function(v) enableNoclip(v) end })
 FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 
-if Humanoid then
-    Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end)
-end
+if Humanoid then Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end) end
 
 -- ====================
--- Checkpoint detection (EXACT folder, list-all children) WITH DROPDOWN UI
---  - Assumes checkpoints are direct children: Workspace.Checkpoints.<number or name>
---  - Lists EVERY child even if its parts haven't streamed in yet
---  - Anchor (BasePart) is resolved AT TELEPORT TIME
+-- Checkpoint detection (EXACT folder) WITH DROPDOWN UI
 -- ====================
 local checkpoints = {} -- { name=string, root=Instance }
--- Only show numeric names or 'Summit'
-local function isValidCheckpointName(name)
-    local lower = string.lower(name)
-    if lower == "summit" then return true end
-    return string.match(name, "^%d+$") ~= nil
-end
 local cpIndexByName = {}
 local labelDetected
 local dropdown -- Rayfield dropdown element
 local selectedName
 local CP_FOLDER_NAME = "Checkpoints"
 local CheckpointsFolder
-
 local folderConn, folderChildConn
 local refreshDebounce = false
+
+-- Only show numeric names or 'Summit'
+local function isValidCheckpointName(name)
+    local lower = string.lower(name)
+    if lower == "summit" then return true end
+    return string.match(name, "^%d+$") ~= nil
+end
 
 local function namesArray()
     local t = {}; for i, cp in ipairs(checkpoints) do t[i] = cp.name end; return t
 end
 
 local function resolveFolder()
-    -- EXACT path only to avoid grabbing the wrong folder elsewhere
     return Workspace:FindFirstChild(CP_FOLDER_NAME)
 end
 
@@ -200,7 +218,6 @@ local function tryResolveAnchorCF(root)
         if root.PrimaryPart then return root.PrimaryPart.CFrame end
         local cf = root:GetBoundingBox(); return cf
     end
-    -- Folder or other container: search for any BasePart descendant on demand
     for _, d in ipairs(root:GetDescendants()) do
         if d:IsA("BasePart") then return d.CFrame end
     end
@@ -211,16 +228,11 @@ local function collectCheckpoints()
     checkpoints = {}; cpIndexByName = {}
     local folder = resolveFolder(); CheckpointsFolder = folder
     if not folder then return end
-
-    -- List ALL direct children as checkpoint roots (Folder/Model/Part)
     for _, child in ipairs(folder:GetChildren()) do
         if isValidCheckpointName(child.Name) and (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) then
             table.insert(checkpoints, { name = child.Name, root = child })
         end
     end
-    end
-
-    -- sort: numeric asc (including 0), then alpha, Summit last
     for _, it in ipairs(checkpoints) do
         local n = tonumber(it.name)
         local lower = string.lower(it.name)
@@ -238,33 +250,23 @@ local function updateDetectedLabel()
     if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end) else labelDetected = TPTab:CreateLabel(text) end
 end
 
+-- Dropdown refresh compatible across Rayfield variants
 local function rebuildDropdownUI()
     local options = namesArray()
-    -- Ensure we always have at least one displayable option
     if #options == 0 then options = {"(none)"} end
-
     if dropdown then
-        -- Try Rayfield v4 API: Set(list)
         local ok1 = pcall(function() return dropdown.Set and dropdown:Set(options) end)
-        -- Try Rayfield v3 API: Refresh(list, keepCurrent)
         local ok2 = false
-        if not ok1 then
-            ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end)
-        end
-        if not ok1 and not ok2 then
-            dropdown = nil -- fallback to rebuilding
-        end
+        if not ok1 then ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end) end
+        if not ok1 and not ok2 then dropdown = nil end
     end
-
     if not dropdown then
-        -- Some Rayfield builds expect CurrentOption as a *table* even when Multiple=false; support both
-        local currentAsString = options[1]
-        local currentAsTable  = {options[1]}
+        local currentStr = options[1]
         local created = pcall(function()
             dropdown = TPTab:CreateDropdown({
                 Name = "Choose checkpoint",
                 Options = options,
-                CurrentOption = currentAsString,
+                CurrentOption = currentStr,
                 Multiple = false,
                 Callback = function(opt)
                     if typeof(opt) == "table" then opt = opt[1] end
@@ -277,7 +279,7 @@ local function rebuildDropdownUI()
             dropdown = TPTab:CreateDropdown({
                 Name = "Choose checkpoint",
                 Options = options,
-                CurrentOption = currentAsTable,
+                CurrentOption = {currentStr},
                 Multiple = false,
                 Callback = function(opt)
                     if typeof(opt) == "table" then opt = opt[1] end
@@ -287,23 +289,7 @@ local function rebuildDropdownUI()
             })
         end
     end
-
     if options[1] and options[1] ~= "(none)" then selectedName = options[1] else selectedName = nil end
-end
-    end
-    if not dropdown then
-        dropdown = TPTab:CreateDropdown({
-            Name = "Choose checkpoint",
-            Options = options,
-            CurrentOption = options[1],
-            Multiple = false,
-            Callback = function(opt)
-                if typeof(opt) == "table" then opt = opt[1] end
-                selectedName = opt
-            end
-        })
-    end
-    if options[1] then selectedName = options[1] end
 end
 
 local function refreshUI()
@@ -392,7 +378,10 @@ TPTab:CreateToggle({ Name = "Tap-to-TP on checkpoints (mobile)", CurrentValue = 
             local r = raycastFromScreen(pos[1])
             if r and r.Instance then
                 local owner = findCheckpointAncestor(r.Instance)
-                if owner and cpIndexByName[owner.Name] then teleportToByName(owner.Name) end
+                if owner and cpIndexByName[owner.Name] then
+                    local cf = tryResolveAnchorCF(owner)
+                    if cf then local _, hrp, hum = getCharacter(); if hrp and hum and hum.Health>0 then hrp.CFrame = cf * CFrame.new(0,5,0) end end
+                end
             end
         end)
         Rayfield:Notify({ Title = "Tap-TP Enabled", Content = "Tap a checkpoint to teleport.", Duration = 2 })
@@ -414,7 +403,10 @@ TPTab:CreateToggle({ Name = "Click-to-TP on checkpoints (PC)", CurrentValue = fa
             local r = Workspace:Raycast(ur.Origin, ur.Direction * 2000, params)
             if r and r.Instance then
                 local owner = findCheckpointAncestor(r.Instance)
-                if owner and cpIndexByName[owner.Name] then teleportToByName(owner.Name) end
+                if owner and cpIndexByName[owner.Name] then
+                    local cf = tryResolveAnchorCF(owner)
+                    if cf then local _, hrp, hum = getCharacter(); if hrp and hum and hum.Health>0 then hrp.CFrame = cf * CFrame.new(0,5,0) end end
+                end
             end
         end
     end)
