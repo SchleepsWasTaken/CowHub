@@ -1,128 +1,108 @@
--- LocalScript — StarterPlayerScripts / CheckpointTouchLogger.client.lua
--- Prints checkpoint names to the CLIENT console when your character touches one.
-
--- Detects checkpoints by:
--- 1) Parts inside Workspace.Checkpoints
--- 2) Any BasePart named "Checkpoint..." (case-insensitive)
--- 3) Any BasePart with Attribute IsCheckpoint = true
+-- StarterPlayerScripts / WorkspaceClickInspector.client.lua
+-- Click/tap any 3D object to print its name, class, and full path (client console).
+-- Works on PC (mouse) and mobile (touch). Ignores your own character.
 
 local Players     = game:GetService("Players")
+local UIS         = game:GetService("UserInputService")
 local Workspace   = game:GetService("Workspace")
-local RunService  = game:GetService("RunService")
+
 local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
 
--- === Character helpers ===
-local function getCharacter()
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hrp  = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart")
-    return char, hrp
+-- Build a readable path like Workspace.Map.Ladder.Step01
+local function getFullPath(inst: Instance): string
+    if not inst then return "(nil)" end
+    local parts = {inst.Name}
+    local p = inst.Parent
+    while p and p ~= game do
+        table.insert(parts, 1, p.Name)
+        p = p.Parent
+    end
+    return table.concat(parts, ".")
 end
 
-local Character = getCharacter()
-LocalPlayer.CharacterAdded:Connect(function(c) Character = c end)
-
--- === Checkpoint detection ===
-local checkpoints = {}
-local touchConns  = {} -- part -> RBXScriptConnection
-local debounce    = {} -- part -> tick()
-
-local function isCheckpointPart(p: Instance): boolean
-    if not p or not p:IsA("BasePart") then return false end
-    if p:GetAttribute("IsCheckpoint") == true then return true end
-    local n = string.lower(p.Name)
-    if string.sub(n, 1, 10) == "checkpoint" then return true end
-    return false
+-- Return a RaycastResult from a screen position (Vector2)
+local function raycastFromScreen(screenPos: Vector2)
+    local unitRay = Camera:ViewportPointToRay(screenPos.X, screenPos.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    params.FilterDescendantsInstances = { LocalPlayer.Character } -- ignore self
+    params.IgnoreWater = false
+    return Workspace:Raycast(unitRay.Origin, unitRay.Direction * 5000, params)
 end
 
-local function collectCheckpoints()
-    checkpoints = {}
-    local folder = Workspace:FindFirstChild("Checkpoints")
-    if folder then
-        for _, ch in ipairs(folder:GetChildren()) do
-            if isCheckpointPart(ch) then table.insert(checkpoints, ch) end
-        end
+local function describeInstance(inst: Instance)
+    if not inst then return end
+    -- If you clicked a descendant (e.g., MeshPart inside a Model), the primary
+    -- thing you may care about is the top-level Model (like "Ladder", "Sign").
+    local top = inst
+    while top.Parent and top.Parent ~= Workspace and not top:IsA("Model") do
+        top = top.Parent
+    end
+    local topModel = inst:FindFirstAncestorOfClass("Model") or top
+
+    print(("=== Clicked: %s ==="):format(inst.Name))
+    print(("Class: %s"):format(inst.ClassName))
+    print(("Path: %s"):format(getFullPath(inst)))
+    if topModel and topModel ~= inst then
+        print(("Top Model: %s  (Path: %s)"):format(topModel.Name, getFullPath(topModel)))
     end
 
-    -- Fallback: shallow scan if folder missing or empty
-    if #checkpoints == 0 then
-        for _, d in ipairs(Workspace:GetDescendants()) do
-            if d:IsA("BasePart") and isCheckpointPart(d) then
-                table.insert(checkpoints, d)
-            end
+    -- Helpful extras: attributes on the clicked instance
+    local attrs = inst:GetAttributes()
+    if next(attrs) ~= nil then
+        print("Attributes:")
+        for k, v in pairs(attrs) do
+            print(("  %s = %s"):format(k, tostring(v)))
         end
     end
+    print("====================================")
+end
 
-    -- Sort by trailing number if present, else by name
-    table.sort(checkpoints, function(a, b)
-        local na = tonumber(string.match(a.Name, "%d+")) or math.huge
-        local nb = tonumber(string.match(b.Name, "%d+")) or math.huge
-        if na ~= nb then return na < nb end
-        return a.Name < b.Name
+-- PC: use left-click (mouse)
+local function handleMouseClick()
+    local mouse = LocalPlayer:GetMouse()
+    mouse.Button1Down:Connect(function()
+        -- Prefer Raycast for accuracy; fall back to Mouse.Target if needed
+        local pos = UIS:GetMouseLocation()
+        local result = raycastFromScreen(Vector2.new(pos.X, pos.Y))
+        local target = result and result.Instance or mouse.Target
+        if target then
+            describeInstance(target)
+        end
     end)
 end
 
-local function checkpointNames()
-    local t = {}
-    for i, cp in ipairs(checkpoints) do t[i] = cp.Name end
-    return table.concat(t, ", ")
+-- Mobile + desktop fallback: use InputBegan (touch or mouse)
+local function handleGenericInput()
+    UIS.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+
+        if input.UserInputType == Enum.UserInputType.Touch then
+            local pos = input.Position
+            local result = raycastFromScreen(Vector2.new(pos.X, pos.Y))
+            if result and result.Instance then
+                describeInstance(result.Instance)
+            end
+        elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+            -- Also catch mouse clicks here (some executors prefer this path)
+            local pos = UIS:GetMouseLocation()
+            local result = raycastFromScreen(Vector2.new(pos.X, pos.Y))
+            if result and result.Instance then
+                describeInstance(result.Instance)
+            end
+        end
+    end)
 end
 
--- === Touch wiring ===
-local function onTouched(part, other)
-    -- Debounce per-part to avoid spam on multi-contact
-    local last = debounce[part] or 0
-    if tick() - last < 0.2 then return end
-    debounce[part] = tick()
-
-    local char = Character
-    if not char then return end
-    if other and other:IsDescendantOf(char) then
-        -- Refresh list to be safe (optional; comment out if you prefer static)
-        collectCheckpoints()
-        print(("[Checkpoint Touch] Touched: %s"):format(part.Name))
-        print("[Checkpoint Touch] All detected checkpoints:")
-        print("  " .. (checkpointNames() ~= "" and checkpointNames() or "(none)"))
-    end
-end
-
-local function connectPart(p)
-    if touchConns[p] then return end
-    touchConns[p] = p.Touched:Connect(function(other) onTouched(p, other) end)
-end
-
-local function disconnectAll()
-    for p, conn in pairs(touchConns) do
-        if conn and conn.Disconnect then conn:Disconnect() end
-        touchConns[p] = nil
-    end
-end
-
-local function wireAll()
-    disconnectAll()
-    collectCheckpoints()
-    for _, cp in ipairs(checkpoints) do
-        connectPart(cp)
-    end
-    print(("[Checkpoint Touch] Wired %d checkpoint(s): %s")
-        :format(#checkpoints, checkpointNames()))
-end
-
--- Keep wiring up as the world changes
-wireAll()
-
--- Re-wire if new checkpoints appear later
-Workspace.DescendantAdded:Connect(function(d)
-    if d:IsA("BasePart") and isCheckpointPart(d) then
-        table.insert(checkpoints, d)
-        connectPart(d)
-        print(("[Checkpoint Touch] New checkpoint detected: %s"):format(d.Name))
-    end
+-- Update the blacklist when you respawn
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.1) -- small delay so character exists before clicks arrive
 end)
 
--- Optional periodic re-scan (uncomment if your map streams in/out often)
--- task.spawn(function()
---     while true do
---         task.wait(5)
---         wireAll()
---     end
--- end)
+-- Initialize
+handleMouseClick()
+handleGenericInput()
+
+print("[Inspector] Click/tap any object to log its name, class, and path.")
+print("           Open the client console with F9 (Studio) / executor console.")
