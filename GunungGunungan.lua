@@ -167,6 +167,12 @@ end
 --  - Anchor (BasePart) is resolved AT TELEPORT TIME
 -- ====================
 local checkpoints = {} -- { name=string, root=Instance }
+-- Only show numeric names or 'Summit'
+local function isValidCheckpointName(name)
+    local lower = string.lower(name)
+    if lower == "summit" then return true end
+    return string.match(name, "^%d+$") ~= nil
+end
 local cpIndexByName = {}
 local labelDetected
 local dropdown -- Rayfield dropdown element
@@ -208,9 +214,10 @@ local function collectCheckpoints()
 
     -- List ALL direct children as checkpoint roots (Folder/Model/Part)
     for _, child in ipairs(folder:GetChildren()) do
-        if child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart") then
+        if isValidCheckpointName(child.Name) and (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) then
             table.insert(checkpoints, { name = child.Name, root = child })
         end
+    end
     end
 
     -- sort: numeric asc (including 0), then alpha, Summit last
@@ -233,9 +240,56 @@ end
 
 local function rebuildDropdownUI()
     local options = namesArray()
-    if dropdown and dropdown.Set then
-        local ok = pcall(function() dropdown:Set(options) end)
-        if not ok then dropdown = nil end
+    -- Ensure we always have at least one displayable option
+    if #options == 0 then options = {"(none)"} end
+
+    if dropdown then
+        -- Try Rayfield v4 API: Set(list)
+        local ok1 = pcall(function() return dropdown.Set and dropdown:Set(options) end)
+        -- Try Rayfield v3 API: Refresh(list, keepCurrent)
+        local ok2 = false
+        if not ok1 then
+            ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end)
+        end
+        if not ok1 and not ok2 then
+            dropdown = nil -- fallback to rebuilding
+        end
+    end
+
+    if not dropdown then
+        -- Some Rayfield builds expect CurrentOption as a *table* even when Multiple=false; support both
+        local currentAsString = options[1]
+        local currentAsTable  = {options[1]}
+        local created = pcall(function()
+            dropdown = TPTab:CreateDropdown({
+                Name = "Choose checkpoint",
+                Options = options,
+                CurrentOption = currentAsString,
+                Multiple = false,
+                Callback = function(opt)
+                    if typeof(opt) == "table" then opt = opt[1] end
+                    if opt == "(none)" then return end
+                    selectedName = opt
+                end
+            })
+        end)
+        if not created then
+            dropdown = TPTab:CreateDropdown({
+                Name = "Choose checkpoint",
+                Options = options,
+                CurrentOption = currentAsTable,
+                Multiple = false,
+                Callback = function(opt)
+                    if typeof(opt) == "table" then opt = opt[1] end
+                    if opt == "(none)" then return end
+                    selectedName = opt
+                end
+            })
+        end
+    end
+
+    if options[1] and options[1] ~= "(none)" then selectedName = options[1] else selectedName = nil end
+end
     end
     if not dropdown then
         dropdown = TPTab:CreateDropdown({
