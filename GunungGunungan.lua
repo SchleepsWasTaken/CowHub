@@ -251,22 +251,20 @@ local function updateDetectedLabel()
 end
 
 -- Dropdown refresh compatible across Rayfield variants
+local dropdown
 local function rebuildDropdownUI()
     local options = namesArray()
     if #options == 0 then options = {"(none)"} end
-    if dropdown then
-        local ok1 = pcall(function() return dropdown.Set and dropdown:Set(options) end)
-        local ok2 = false
-        if not ok1 then ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end) end
-        if not ok1 and not ok2 then dropdown = nil end
-    end
-    if not dropdown then
-        local currentStr = options[1]
-        local created = pcall(function()
+
+    -- Some Rayfield builds cache options and ignore Set/Refresh. As a last resort,
+    -- we destroy and recreate the dropdown to guarantee the newest list shows up.
+    local function recreate()
+        if dropdown then pcall(function() if dropdown.Destroy then dropdown:Destroy() end end); dropdown = nil end
+        local ok = pcall(function()
             dropdown = TPTab:CreateDropdown({
                 Name = "Choose checkpoint",
                 Options = options,
-                CurrentOption = currentStr,
+                CurrentOption = options[1],
                 Multiple = false,
                 Callback = function(opt)
                     if typeof(opt) == "table" then opt = opt[1] end
@@ -275,11 +273,11 @@ local function rebuildDropdownUI()
                 end
             })
         end)
-        if not created then
+        if not ok then
             dropdown = TPTab:CreateDropdown({
                 Name = "Choose checkpoint",
                 Options = options,
-                CurrentOption = {currentStr},
+                CurrentOption = {options[1]},
                 Multiple = false,
                 Callback = function(opt)
                     if typeof(opt) == "table" then opt = opt[1] end
@@ -289,14 +287,56 @@ local function rebuildDropdownUI()
             })
         end
     end
+
+    if dropdown then
+        local ok1 = pcall(function() return dropdown.Set and dropdown:Set(options) end)
+        local ok2 = false
+        if not ok1 then ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end) end
+        if not ok1 and not ok2 then recreate() end
+    else
+        recreate()
+    end
+
     if options[1] and options[1] ~= "(none)" then selectedName = options[1] else selectedName = nil end
+end
+
+-- Numeric slider (always reflects latest range even if dropdown glitches)
+local cpSlider
+local sliderValue
+local function rebuildSlider()
+    -- compute numeric min/max from detected checkpoints
+    local nums = {}
+    for _, cp in ipairs(checkpoints) do
+        local n = tonumber(cp.name)
+        if n ~= nil then table.insert(nums, n) end
+    end
+    table.sort(nums)
+    local minN, maxN = nums[1], nums[#nums]
+    if not minN then
+        -- no numeric checkpoints; skip
+        return
+    end
+    if cpSlider then pcall(function() if cpSlider.Destroy then cpSlider:Destroy() end end); cpSlider = nil end
+    cpSlider = TPTab:CreateSlider({
+        Name = "Select checkpoint (number)",
+        Range = {minN, maxN},
+        Increment = 1,
+        Suffix = "#",
+        CurrentValue = minN,
+        Callback = function(v)
+            sliderValue = tostring(v)
+            if cpIndexByName[sliderValue] then selectedName = sliderValue end
+        end
+    })
+    sliderValue = tostring(minN)
+    if cpIndexByName[sliderValue] then selectedName = sliderValue end
 end
 
 local function refreshUI()
     if refreshDebounce then return end
     refreshDebounce = true
     task.delay(0.25, function() refreshDebounce = false end)
-    collectCheckpoints(); updateDetectedLabel(); rebuildDropdownUI()
+    collectCheckpoints(); updateDetectedLabel(); rebuildDropdownUI(); rebuildSlider()
     print("[CP children] "..(#checkpoints>0 and table.concat(namesArray(), ", ") or "(none)"))
 end
 
