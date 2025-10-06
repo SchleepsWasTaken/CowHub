@@ -1,27 +1,31 @@
--- Gunung Nomaly Utility GUI
--- Fly + Noclip + Checkpoint TP (custom slider) + Tap/Click TP
--- Persistent cache: names + positions (works with StreamingEnabled)
-
-----------------------------------------------------------------------
--- Safe Rayfield loader
-----------------------------------------------------------------------
+-- === Rayfield loader (works on Delta/Xeno) ===
 local Rayfield
 do
-    local okGet, src = pcall(game.HttpGet, game, "https://sirius.menu/rayfield")
-    if okGet and typeof(loadstring) == "function" then
-        local fn = loadstring(src)
-        if fn then
-            local okRun, lib = pcall(fn)
-            if okRun and type(lib) == "table" and lib.CreateWindow then Rayfield = lib end
+    local src
+    local ok = pcall(function()
+        src = game:HttpGet("https://sirius.menu/rayfield")
+    end)
+    if ok and src and type(loadstring) == "function" then
+        local f = loadstring(src)
+        local ok2, lib = pcall(f)
+        if ok2 and type(lib) == "table" and lib.CreateWindow then
+            Rayfield = lib
+        end
+    end
+    -- fallback to ReplicatedStorage module only if the remote fetch failed
+    if not Rayfield then
+        local RS = game:GetService("ReplicatedStorage")
+        local ok3, lib = pcall(function()
+            return require(RS:WaitForChild("Rayfield", 5))
+        end)
+        if ok3 and type(lib) == "table" and lib.CreateWindow then
+            Rayfield = lib
         end
     end
 end
-if not Rayfield then
-    local RS = game:GetService("ReplicatedStorage")
-    local okRequire, lib = pcall(function() return require(RS:WaitForChild("Rayfield", 5)) end)
-    if okRequire and type(lib) == "table" and lib.CreateWindow then Rayfield = lib end
-end
-if not Rayfield then warn("[Rayfield] Could not load."); return end
+
+assert(Rayfield and Rayfield.CreateWindow, "[Rayfield] Could not load")
+
 
 ----------------------------------------------------------------------
 -- Window & tabs
