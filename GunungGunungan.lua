@@ -180,17 +180,33 @@ local function resolveFolder()
 end
 
 local function buildCheckpointEntry(child)
+    -- Accept BasePart / Model / Folder (folder may contain parts/models)
     local entry = { name = child.Name, root = child }
-    if child:IsA("BasePart") then
-        entry.getCFrame = function() return child.CFrame end
-    elseif child:IsA("Model") then
-        entry.getCFrame = function()
+
+    local function findAnyPart(inst)
+        if inst:IsA("BasePart") then return inst end
+        if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
+        for _, d in ipairs(inst:GetDescendants()) do
+            if d:IsA("BasePart") then return d end
+        end
+        return nil
+    end
+
+    entry.getCFrame = function()
+        if child:IsA("BasePart") then
+            return child.CFrame
+        elseif child:IsA("Model") then
             if child.PrimaryPart then return child.PrimaryPart.CFrame end
             local cf = child:GetBoundingBox(); return cf
+        else -- Folder or other container
+            local p = findAnyPart(child)
+            if p then return p.CFrame end
+            local ok, cf = pcall(function() return child:GetPivot() end)
+            if ok then return cf end
+            return CFrame.new()
         end
-    else
-        entry.getCFrame = function() return child:GetPivot() end
     end
+
     return entry
 end
 
@@ -269,14 +285,23 @@ folderConn = Workspace.ChildAdded:Connect(function(child)
         CheckpointsFolder = child
         task.wait(0.05); refreshUI()
         if folderChildConn then folderChildConn:Disconnect() end
-        folderChildConn = child.ChildAdded:Connect(function(ch) if ch:IsA("BasePart") or ch:IsA("Model") then task.wait(0.05); refreshUI() end end)
+        -- Listen to *descendants* so nested parts under folders also trigger
+        folderChildConn = child.DescendantAdded:Connect(function(ch)
+            if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then
+                task.wait(0.05); refreshUI()
+            end
+        end)
     end
 end)
 
 local folder = resolveFolder()
 if folder then
     if folderChildConn then folderChildConn:Disconnect() end
-    folderChildConn = folder.ChildAdded:Connect(function(ch) if ch:IsA("BasePart") or ch:IsA("Model") then task.wait(0.05); refreshUI() end end)
+    folderChildConn = folder.DescendantAdded:Connect(function(ch)
+        if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then
+            task.wait(0.05); refreshUI()
+        end
+    end)
 end
 
 -- ====================
