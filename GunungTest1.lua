@@ -2,25 +2,40 @@
 local Rayfield
 
 local function fetch(url)
-    -- 1) Executor request APIs
-    local req = (syn and syn.request) or (http and http.request) or http_request or request
-    if req then
-        local ok, res = pcall(req, {Url = url, Method = "GET"})
+    -- 1) Executor request APIs (guarded + wrapped)
+    local req = (syn and syn.request)
+             or (type(http) == "table" and http.request)
+             or rawget(getgenv() or {}, "http_request")
+             or http_request
+             or request
+
+    if type(req) == "function" then
+        local ok, res = pcall(function()
+            return req({ Url = url, Method = "GET" })
+        end)
         if ok and res and (res.Body or res.body) then
             return res.Body or res.body
         end
     end
-    -- 2) Exploit-provided game:HttpGet
+
+    -- 2) Exploit-provided game:HttpGet (wrapped)
     if typeof(game.HttpGet) == "function" then
-        local ok, body = pcall(function() return game:HttpGet(url) end)
+        local ok, body = pcall(function()
+            return game:HttpGet(url)
+        end)
         if ok and body then return body end
     end
-    -- 3) Studio fallback (if HttpService is allowed)
+
+    -- 3) Studio/HTTPService fallback (wrapped)
     local HttpService = game:GetService("HttpService")
-    local ok, body = pcall(function() return HttpService:GetAsync(url) end)
+    local ok, body = pcall(function()
+        return HttpService:GetAsync(url)
+    end)
     if ok and body then return body end
+
     return nil
 end
+
 
 do
     local src = fetch("https://sirius.menu/rayfield")
