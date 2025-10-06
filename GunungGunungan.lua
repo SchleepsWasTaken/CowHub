@@ -161,7 +161,10 @@ if Humanoid then
 end
 
 -- ====================
--- Checkpoint detection (numeric names + Summit) WITH DROPDOWN UI
+-- Checkpoint detection (robust) WITH DROPDOWN UI
+--  - Works if children are Parts, Models, or Folders
+--  - Works if checkpoints are nested several levels deep
+--  - Works even if the 'Checkpoints' folder is created later or streamed in
 -- ====================
 local checkpoints = {} -- { name=string, root=Instance, getCFrame=function():CFrame }
 local cpIndexByName = {}
@@ -173,35 +176,55 @@ local CheckpointsFolder
 
 local folderConn, folderChildConn
 local refreshDebounce = false
+local periodicScanConn
 
-local function resolveFolder()
-    CheckpointsFolder = Workspace:FindFirstChild(CP_FOLDER_NAME) or SafeWait(Workspace, CP_FOLDER_NAME, 10)
-    return CheckpointsFolder
+local function namesArray()
+    local t = {}; for i, cp in ipairs(checkpoints) do t[i] = cp.name end; return t
 end
 
-local function buildCheckpointEntry(child)
-    -- Accept BasePart / Model / Folder (folder may contain parts/models)
-    -- Returns entry or nil if no BasePart could be found inside.
-    local function findAnyPart(inst)
-        if inst:IsA("BasePart") then return inst end
-        if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
-        for _, d in ipairs(inst:GetDescendants()) do
-            if d:IsA("BasePart") then return d end
+-- Helpers
+local function SafeWait(parent, name, timeout)
+    local obj = parent:FindFirstChild(name)
+    if obj then return obj end
+    local ok, res = pcall(function() return parent:WaitForChild(name, timeout or 5) end)
+    if ok then return res end
+    return nil
+end
+
+local function resolveFolder()
+    -- 1) direct child
+    local f = Workspace:FindFirstChild(CP_FOLDER_NAME)
+    if f then return f end
+    -- 2) any descendant named 'Checkpoints' (case-insensitive)
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if (d:IsA("Folder") or d:IsA("Model")) and string.lower(d.Name) == string.lower(CP_FOLDER_NAME) then
+            return d
         end
-        return nil
     end
+    -- 3) wait a bit
+    return SafeWait(Workspace, CP_FOLDER_NAME, 5)
+end
 
-    local anchor = findAnyPart(child)
+local function findAnyPart(inst)
+    if inst:IsA("BasePart") then return inst end
+    if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
+    for _, d in ipairs(inst:GetDescendants()) do
+        if d:IsA("BasePart") then return d end
+    end
+    return nil
+end
+
+local function buildCheckpointEntry(root)
+    local anchor = findAnyPart(root)
     if not anchor then return nil end
-
-    local entry = { name = child.Name, root = child }
+    local entry = { name = root.Name, root = root }
     entry.getCFrame = function()
-        if child:IsA("BasePart") then
-            return child.CFrame
-        elseif child:IsA("Model") then
-            if child.PrimaryPart then return child.PrimaryPart.CFrame end
-            local cf = child:GetBoundingBox(); return cf
-        else -- Folder or other container
+        if root:IsA("BasePart") then
+            return root.CFrame
+        elseif root:IsA("Model") then
+            if root.PrimaryPart then return root.PrimaryPart.CFrame end
+            local cf = root:GetBoundingBox(); return cf
+        else
             return anchor.CFrame
         end
     end
@@ -210,24 +233,13 @@ end
 
 local function collectCheckpoints()
     checkpoints = {}; cpIndexByName = {}
-    local folder = resolveFolder(); if not folder then return end
+    local folder = resolveFolder(); CheckpointsFolder = folder
+    if not folder then return end
 
-    -- We consider the "checkpoint object" to be the NEAREST ancestor directly under
-    -- Workspace.Checkpoints that contains a BasePart anywhere inside.
-    local seen = {} -- [Instance] = true (roots under folder)
+    local seen = {} -- [Instance]=true (the direct child under folder used as a checkpoint root)
 
-    -- include direct children first
-    for _, child in ipairs(folder:GetChildren()) do
-        if (child:IsA("BasePart") or child:IsA("Model") or child:IsA("Folder")) then
-            local entry = buildCheckpointEntry(child)
-            if entry then
-                seen[child] = true
-                table.insert(checkpoints, entry)
-            end
-        end
-    end
-
-    -- include descendants that belong to a different root under folder
+    -- Strategy: for every BasePart / Model anywhere under Checkpoints,
+    -- walk up until the parent is the Checkpoints folder; that node is the checkpoint root.
     for _, d in ipairs(folder:GetDescendants()) do
         if d:IsA("BasePart") or d:IsA("Model") then
             local root = d
@@ -244,6 +256,17 @@ local function collectCheckpoints()
         end
     end
 
+    -- Also include any direct children which already are parts/models/folders with parts
+    for _, child in ipairs(folder:GetChildren()) do
+        if not seen[child] then
+            local entry = buildCheckpointEntry(child)
+            if entry then
+                seen[child] = true
+                table.insert(checkpoints, entry)
+            end
+        end
+    end
+
     -- sort: numeric asc, then alpha, Summit last
     for _, it in ipairs(checkpoints) do
         local n = tonumber(it.name)
@@ -256,29 +279,9 @@ local function collectCheckpoints()
     table.sort(checkpoints, function(a,b) if a._group ~= b._group then return a._group < b._group end return a._key < b._key end)
     for i, it in ipairs(checkpoints) do cpIndexByName[it.name] = i end
 end
-    for _, child in ipairs(folder:GetChildren()) do
-        if child:IsA("BasePart") or child:IsA("Model") then
-            table.insert(checkpoints, buildCheckpointEntry(child))
-        end
-    end
-    for _, it in ipairs(checkpoints) do
-        local n = tonumber(it.name)
-        local lower = string.lower(it.name)
-        local summit = (lower == "summit")
-        if summit then it._group, it._key = 2, math.huge
-        elseif n then it._group, it._key = 0, n
-        else it._group, it._key = 1, lower end
-    end
-    table.sort(checkpoints, function(a,b) if a._group ~= b._group then return a._group < b._group end return a._key < b._key end)
-    for i, it in ipairs(checkpoints) do cpIndexByName[it.name] = i end
-end
-
-local function namesArray()
-    local t = {}; for i, cp in ipairs(checkpoints) do t[i] = cp.name end; return t
-end
 
 local function updateDetectedLabel()
-    local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", ")) or ("No checkpoints found in Workspace."..CP_FOLDER_NAME)
+    local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", ")) or ("No checkpoints found in '"..CP_FOLDER_NAME.."' yet (will refresh).")
     if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end) else labelDetected = TPTab:CreateLabel(text) end
 end
 
@@ -308,31 +311,53 @@ local function refreshUI()
     refreshDebounce = true
     task.delay(0.25, function() refreshDebounce = false end)
     collectCheckpoints(); updateDetectedLabel(); rebuildDropdownUI()
-    print("[CP order] "..table.concat(namesArray(), ", "))
+    print("[CP order] "..(#checkpoints>0 and table.concat(namesArray(), ", ") or "(none)"))
 end
 
--- Static buttons (operate on dropdown selection)
+-- Buttons
 TPTab:CreateButton({ Name = "Teleport (selected)", Callback = function() if selectedName then local idx = cpIndexByName[selectedName]; if idx then local cp = checkpoints[idx]; local _, hrp, hum = getCharacter(); if hrp and hum and hum.Health > 0 then hrp.CFrame = cp.getCFrame() * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..cp.name, Duration=2}) end end end end })
-
 TPTab:CreateButton({ Name = "Auto TP through all", Callback = function() local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health > 0) then Rayfield:Notify({ Title = "Error", Content = "Player not ready", Duration = 2 }); return end; for _, cp in ipairs(checkpoints) do if not hum or hum.Health <= 0 then break end; hrp.CFrame = cp.getCFrame() * CFrame.new(0, 5, 0); task.wait(1) end; Rayfield:Notify({ Title = "Auto TP Complete", Content = "Visited all checkpoints", Duration = 3 }) end })
-
 TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
+TPTab:CreateButton({ Name = "Debug scan (print structure)", Callback = function()
+    print("[Debug] Scanning Workspace for '"..CP_FOLDER_NAME.."'...")
+    local folder = resolveFolder()
+    print("[Debug] Folder:", folder)
+    if folder then
+        for _, child in ipairs(folder:GetChildren()) do
+            print("[Debug] Child:", child:GetFullName(), child.ClassName)
+        end
+        for _, d in ipairs(folder:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local root = d
+                while root and root.Parent ~= folder do root = root.Parent end
+                print("[Debug] Part:", d:GetFullName(), "-> root:", root and root.Name)
+            end
+        end
+    end
+end })
 
--- Initial build
+-- Initial build + periodic rescans (helpful with streaming maps)
 refreshUI()
+if periodicScanConn then periodicScanConn:Disconnect() end
+periodicScanConn = RunService.Heartbeat:Connect(function()
+    -- Every ~3 seconds do a light rescan until we have at least 5 items
+    local t = tick() % 3
+    if t < 0.02 then
+        local before = #checkpoints
+        collectCheckpoints()
+        if #checkpoints ~= before then updateDetectedLabel(); rebuildDropdownUI() end
+    end
+end)
 
--- Watchers (deduped)
+-- Watchers (descendant-aware)
 if folderConn then folderConn:Disconnect() end
 folderConn = Workspace.ChildAdded:Connect(function(child)
-    if child.Name == CP_FOLDER_NAME then
+    if string.lower(child.Name) == string.lower(CP_FOLDER_NAME) then
         CheckpointsFolder = child
         task.wait(0.05); refreshUI()
         if folderChildConn then folderChildConn:Disconnect() end
-        -- Listen to *descendants* so nested parts under folders also trigger
         folderChildConn = child.DescendantAdded:Connect(function(ch)
-            if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then
-                task.wait(0.05); refreshUI()
-            end
+            if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then task.wait(0.05); refreshUI() end
         end)
     end
 end)
@@ -341,9 +366,7 @@ local folder = resolveFolder()
 if folder then
     if folderChildConn then folderChildConn:Disconnect() end
     folderChildConn = folder.DescendantAdded:Connect(function(ch)
-        if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then
-            task.wait(0.05); refreshUI()
-        end
+        if ch:IsA("BasePart") or ch:IsA("Model") or ch:IsA("Folder") then task.wait(0.05); refreshUI() end
     end)
 end
 
