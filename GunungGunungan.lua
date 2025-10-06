@@ -10,7 +10,7 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Window = Rayfield:CreateWindow({
     Name = "Gunung Nomaly Utility GUI",
     LoadingTitle = "Flight & TP Script",
-    LoadingSubtitle = "by Grok",
+    LoadingSubtitle = "by Babang Sekelep",
     ConfigurationSaving = { Enabled = false },
 })
 
@@ -138,77 +138,145 @@ if Humanoid then
 end
 
 -- ====================
--- Checkpoint detection
+-- Checkpoint detection (revised for numeric names + Summit)
 -- ====================
--- We support:
--- 1) Workspace.Checkpoints folder containing parts named "CheckpointX" (X = number)
--- 2) Any BasePart with Attribute "IsCheckpoint" = true
--- 3) Any BasePart with Name starting with "Checkpoint" (case-insensitive)
+-- Expected structure: Workspace.Checkpoints contains children named "1", "2", ... and possibly "Summit".
+-- Children can be BaseParts OR Models. For Models we use PrimaryPart or the model's bounding box.
 
-local checkpoints = {}
+local checkpoints = {} -- each item: { name=string, root=Instance, getCFrame=function():CFrame }
+local labelDetected -- UI label we update once
+local CP_FOLDER_NAME = "Checkpoints"
+local CP_WAIT_SECS   = 20
+local CheckpointsFolder
 
-local function isCheckpointPart(p)
-    if not p or not p:IsA("BasePart") then return false end
-    if p:GetAttribute("IsCheckpoint") == true then return true end
-    local n = string.lower(p.Name)
-    if string.sub(n,1,10) == "checkpoint" then return true end
-    return false
+local function resolveFolder(waitTime)
+    if CheckpointsFolder and CheckpointsFolder.Parent then return CheckpointsFolder end
+    CheckpointsFolder = Workspace:FindFirstChild(CP_FOLDER_NAME)
+    if CheckpointsFolder then return CheckpointsFolder end
+    if waitTime and waitTime > 0 then
+        local ok, folder = pcall(function()
+            return Workspace:WaitForChild(CP_FOLDER_NAME, waitTime)
+        end)
+        if ok then CheckpointsFolder = folder end
+    end
+    return CheckpointsFolder
+end
+
+local function buildCheckpointEntry(child)
+    local entry = { name = child.Name, root = child }
+    if child:IsA("BasePart") then
+        entry.getCFrame = function() return child.CFrame end
+    elseif child:IsA("Model") then
+        entry.getCFrame = function()
+            if child.PrimaryPart then return child.PrimaryPart.CFrame end
+            local cf = child:GetBoundingBox()
+            return cf
+        end
+    else
+        entry.getCFrame = function() return CFrame.new(child:GetPivot().Position) end
+    end
+    return entry
 end
 
 local function collectCheckpoints()
     checkpoints = {}
-    -- Folder path preferred
-    local folder = Workspace:FindFirstChild("Checkpoints")
-    if folder then
-        for _, child in ipairs(folder:GetChildren()) do
-            if isCheckpointPart(child) then table.insert(checkpoints, child) end
-        end
-    else
-        -- fallback: scan a shallow set of descendants (avoid huge scans)
-        for _, child in ipairs(Workspace:GetDescendants()) do
-            if child:IsA("BasePart") and isCheckpointPart(child) then
-                table.insert(checkpoints, child)
-            end
+    local folder = resolveFolder(CP_WAIT_SECS)
+    if not folder then
+        warn("[Checkpoints] 'Workspace."..CP_FOLDER_NAME.."' not found yet; will auto-refresh when it appears.")
+        return
+    end
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("BasePart") or child:IsA("Model") then
+            table.insert(checkpoints, buildCheckpointEntry(child))
         end
     end
-    -- sort by trailing number if present, otherwise by name
+    -- Sort: numeric first ascending, then alpha, with "Summit" forced to last.
+    for _, it in ipairs(checkpoints) do
+        local n = tonumber(it.name)
+        local lower = string.lower(it.name)
+        local summit = (lower == "summit")
+        if summit then
+            it._group, it._key = 2, math.huge
+        elseif n then
+            it._group, it._key = 0, n
+        else
+            it._group, it._key = 1, lower
+        end
+    end
     table.sort(checkpoints, function(a,b)
-        local na = tonumber(string.match(a.Name, "%d+")) or math.huge
-        local nb = tonumber(string.match(b.Name, "%d+")) or math.huge
-        if na ~= nb then return na < nb end
-        return a.Name < b.Name
+        if a._group ~= b._group then return a._group < b._group end
+        return a._key < b._key
     end)
 end
 
 local function namesList(arr)
     local t = {}
-    for i, cp in ipairs(arr) do t[i] = cp.Name end
+    for i, cp in ipairs(arr) do t[i] = cp.name end
     return table.concat(t, ", ")
 end
 
 collectCheckpoints()
 
-if #checkpoints > 0 then
-    TPTab:CreateLabel("Detected Checkpoints: " .. namesList(checkpoints))
-else
-    TPTab:CreateLabel("No checkpoints found. Ensure parts are named 'CheckpointX' or set Attribute IsCheckpoint=true.")
+-- Detected label
+local function updateDetectedLabel()
+    local text
+    if #checkpoints > 0 then
+        text = "Detected Checkpoints: " .. namesList(checkpoints)
+    else
+        text = "No checkpoints found yet in Workspace."..CP_FOLDER_NAME.." (will auto-refresh)."
+    end
+    if labelDetected and labelDetected.Set then
+        pcall(function() labelDetected:Set(text) end)
+    else
+        labelDetected = TPTab:CreateLabel(text)
+    end
+end
+updateDetectedLabel()
+
+-- Teleport buttons
+local function teleportTo(cp)
+    local _, hrp, hum = getCharacter()
+    if not (hrp and hum and hum.Health > 0) then
+        Rayfield:Notify({ Title = "Error", Content = "Player character not ready.", Duration = 3 })
+        return
+    end
+    local cf = cp.getCFrame()
+    hrp.CFrame = cf * CFrame.new(0, 5, 0)
+    Rayfield:Notify({ Title = "Teleported", Content = "To "..cp.name, Duration = 2 })
 end
 
--- Create buttons
 local function buildButtons()
+
+-- Auto-refresh when the folder appears / changes
+Workspace.ChildAdded:Connect(function(child)
+    if child.Name == CP_FOLDER_NAME then
+        CheckpointsFolder = child
+        task.wait(0.1)
+        collectCheckpoints()
+        updateDetectedLabel()
+        buildButtons()
+    end
+end)
+
+-- If the folder already exists, listen for new children being added later
+local function startFolderWatch()
+    local folder = resolveFolder(0)
+    if not folder then return end
+    folder.ChildAdded:Connect(function(ch)
+        if ch:IsA("BasePart") or ch:IsA("Model") then
+            task.wait(0.05)
+            collectCheckpoints()
+            updateDetectedLabel()
+            buildButtons()
+        end
+    end)
+end
+startFolderWatch()
     if #checkpoints == 0 then return end
     for _, cp in ipairs(checkpoints) do
         TPTab:CreateButton({
-            Name = "Teleport to "..cp.Name,
-            Callback = function()
-                local _, hrp, hum = getCharacter()
-                if hrp and hum and hum.Health > 0 then
-                    hrp.CFrame = cp.CFrame * CFrame.new(0, 5, 0)
-                    Rayfield:Notify({ Title = "Teleported", Content = "To "..cp.Name, Duration = 2 })
-                else
-                    Rayfield:Notify({ Title = "Error", Content = "Player character not ready.", Duration = 3 })
-                end
-            end
+            Name = "Teleport to "..cp.name,
+            Callback = function() teleportTo(cp) end
         })
     end
 
@@ -222,7 +290,7 @@ local function buildButtons()
             end
             for _, cp in ipairs(checkpoints) do
                 if not hum or hum.Health <= 0 then break end
-                hrp.CFrame = cp.CFrame * CFrame.new(0, 5, 0)
+                hrp.CFrame = cp.getCFrame() * CFrame.new(0, 5, 0)
                 task.wait(1)
             end
             Rayfield:Notify({ Title = "Auto TP Complete", Content = "Visited all checkpoints.", Duration = 3 })
@@ -232,22 +300,37 @@ end
 
 buildButtons()
 
+-- Helper: find which checkpoint a clicked/tapped part belongs to
+local function findCheckpointByInstance(inst)
+    if not inst then return nil end
+    for _, cp in ipairs(checkpoints) do
+        if cp.root == inst then return cp end
+        if inst:IsDescendantOf(cp.root) then return cp end
+    end
+    return nil
+end
+
 -- Refresh list/buttons
 TPTab:CreateButton({
     Name = "Refresh checkpoints",
     Callback = function()
         collectCheckpoints()
-        Rayfield:Notify({ Title = "Refreshed", Content = (#checkpoints).." checkpoints detected.", Duration = 2 })
-        -- Rebuild the tab by toggling window (simple way to redraw)
-        Rayfield:ToggleWindow(false)
-        Rayfield:ToggleWindow(true)
+        if labelDetected and labelDetected.Set then
+            pcall(function()
+                labelDetected:Set("Detected Checkpoints: " .. namesList(checkpoints))
+            end)
+        else
+            Rayfield:Notify({ Title = "Refreshed", Content = (#checkpoints).." checkpoints detected.", Duration = 2 })
+        end
+        -- Note: Rayfield doesn't support removing old buttons; new ones will append.
+        buildButtons()
     end
 })
 
 -- ====================
--- Tap-to-teleport (only on checkpoint parts)
+-- Tap-to-teleport (checkpoint-aware, works with Models too)
 -- ====================
-local tapTPEnabled = false
+local touchConn
 
 local function raycastFromScreen(screenPos)
     local cam = Workspace.CurrentCamera
@@ -259,34 +342,21 @@ local function raycastFromScreen(screenPos)
     return Workspace:Raycast(unitRay.Origin, unitRay.Direction * 2000, rayParams)
 end
 
-local function partIsInCheckpoints(part)
-    for _, cp in ipairs(checkpoints) do
-        if part == cp then return true end
-    end
-    return false
-end
-
-local touchConn
-
 TPTab:CreateToggle({
     Name = "Tap-to-TP on checkpoints",
     CurrentValue = false,
     Callback = function(value)
-        tapTPEnabled = value
         if touchConn then touchConn:Disconnect() touchConn = nil end
         if value then
             touchConn = UIS.TouchTap:Connect(function(pos, processed)
                 if processed then return end
                 local r = raycastFromScreen(pos[1])
-                if r and r.Instance and partIsInCheckpoints(r.Instance) then
-                    local _, hrp, hum = getCharacter()
-                    if hrp and hum and hum.Health > 0 then
-                        hrp.CFrame = r.Instance.CFrame * CFrame.new(0, 5, 0)
-                        Rayfield:Notify({ Title = "Teleported", Content = "To "..r.Instance.Name, Duration = 2 })
-                    end
+                if r and r.Instance then
+                    local cp = findCheckpointByInstance(r.Instance)
+                    if cp then teleportTo(cp) end
                 end
             end)
-            Rayfield:Notify({ Title = "Tap-TP Enabled", Content = "Tap a checkpoint part to teleport.", Duration = 3 })
+            Rayfield:Notify({ Title = "Tap-TP Enabled", Content = "Tap a checkpoint part/model to teleport.", Duration = 3 })
         else
             Rayfield:Notify({ Title = "Tap-TP Disabled", Content = "Tap teleport off.", Duration = 3 })
         end
@@ -305,5 +375,12 @@ local function addVisibilityToggle(tab)
 end
 addVisibilityToggle(FlightTab)
 addVisibilityToggle(TPTab)
+
+-- Debug print once
+if #checkpoints > 0 then
+    print("[Checkpoints] "..namesList(checkpoints))
+else
+    print("[Checkpoints] none found")
+end
 
 -- Done
