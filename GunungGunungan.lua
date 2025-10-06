@@ -183,13 +183,12 @@ FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 if Humanoid then Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end) end
 
 -- ====================
--- Checkpoint detection (EXACT folder) WITH DROPDOWN UI
+-- Checkpoint detection (EXACT folder) WITH SLIDER UI ONLY
 -- ====================
 local checkpoints = {} -- { name=string, root=Instance }
 local cpIndexByName = {}
 local labelDetected
-local dropdown -- Rayfield dropdown element
-local selectedName
+local selectedName -- string of the currently selected checkpoint
 local CP_FOLDER_NAME = "Checkpoints"
 local CheckpointsFolder
 local folderConn, folderChildConn
@@ -250,60 +249,28 @@ local function updateDetectedLabel()
     if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end) else labelDetected = TPTab:CreateLabel(text) end
 end
 
--- Dropdown refresh compatible across Rayfield variants
-local dropdown
-local function rebuildDropdownUI()
-    local options = namesArray()
-    if #options == 0 then options = {"(none)"} end
-
-    -- Some Rayfield builds cache options and ignore Set/Refresh. As a last resort,
-    -- we destroy and recreate the dropdown to guarantee the newest list shows up.
-    local function recreate()
-        if dropdown then pcall(function() if dropdown.Destroy then dropdown:Destroy() end end); dropdown = nil end
-        local ok = pcall(function()
-            dropdown = TPTab:CreateDropdown({
-                Name = "Choose checkpoint",
-                Options = options,
-                CurrentOption = options[1],
-                Multiple = false,
-                Callback = function(opt)
-                    if typeof(opt) == "table" then opt = opt[1] end
-                    if opt == "(none)" then return end
-                    selectedName = opt
-                end
-            })
-        end)
-        if not ok then
-            dropdown = TPTab:CreateDropdown({
-                Name = "Choose checkpoint",
-                Options = options,
-                CurrentOption = {options[1]},
-                Multiple = false,
-                Callback = function(opt)
-                    if typeof(opt) == "table" then opt = opt[1] end
-                    if opt == "(none)" then return end
-                    selectedName = opt
-                end
-            })
-        end
-    end
-
-    if dropdown then
-        local ok1 = pcall(function() return dropdown.Set and dropdown:Set(options) end)
-        local ok2 = false
-        if not ok1 then ok2 = pcall(function() return dropdown.Refresh and dropdown:Refresh(options, true) end) end
-        if not ok1 and not ok2 then recreate() end
-    else
-        recreate()
-    end
-
-    if options[1] and options[1] ~= "(none)" then selectedName = options[1] else selectedName = nil end
-end
-
--- Numeric slider (always reflects latest range even if dropdown glitches)
+-- Slider UI (no dropdown)
 local cpSlider
 local sliderValue
+
+local function findNearestExisting(num)
+    -- num is a number; returns string name of nearest existing numeric checkpoint
+    local down = num
+    while down >= 0 do
+        if cpIndexByName[tostring(down)] then return tostring(down) end
+        down -= 1
+    end
+    local up = num
+    while up <= num + 1000 do -- reasonable cap
+        if cpIndexByName[tostring(up)] then return tostring(up) end
+        up += 1
+    end
+    return nil
+end
+
 local function rebuildSlider()
+    if cpSlider then pcall(function() if cpSlider.Destroy then cpSlider:Destroy() end end); cpSlider = nil end
+
     -- compute numeric min/max from detected checkpoints
     local nums = {}
     for _, cp in ipairs(checkpoints) do
@@ -313,30 +280,34 @@ local function rebuildSlider()
     table.sort(nums)
     local minN, maxN = nums[1], nums[#nums]
     if not minN then
-        -- no numeric checkpoints; skip
+        -- no numeric checkpoints; create a disabled slider substitute label
+        TPTab:CreateLabel("No numeric checkpoints found")
+        selectedName = nil
         return
     end
-    if cpSlider then pcall(function() if cpSlider.Destroy then cpSlider:Destroy() end end); cpSlider = nil end
+
     cpSlider = TPTab:CreateSlider({
-        Name = "Select checkpoint (number)",
+        Name = "Checkpoint #",
         Range = {minN, maxN},
         Increment = 1,
         Suffix = "#",
         CurrentValue = minN,
         Callback = function(v)
-            sliderValue = tostring(v)
-            if cpIndexByName[sliderValue] then selectedName = sliderValue end
+            sliderValue = tonumber(v)
+            local nearest = findNearestExisting(sliderValue)
+            selectedName = nearest
         end
     })
-    sliderValue = tostring(minN)
-    if cpIndexByName[sliderValue] then selectedName = sliderValue end
+
+    sliderValue = minN
+    selectedName = tostring(minN)
 end
 
 local function refreshUI()
     if refreshDebounce then return end
     refreshDebounce = true
     task.delay(0.25, function() refreshDebounce = false end)
-    collectCheckpoints(); updateDetectedLabel(); rebuildDropdownUI(); rebuildSlider()
+    collectCheckpoints(); updateDetectedLabel(); rebuildSlider()
     print("[CP children] "..(#checkpoints>0 and table.concat(namesArray(), ", ") or "(none)"))
 end
 
@@ -348,7 +319,7 @@ TPTab:CreateButton({ Name = "Teleport (selected)", Callback = function()
     local cf = tryResolveAnchorCF(cp.root)
     if not cf then Rayfield:Notify({Title="No anchor yet", Content="No part found inside '"..cp.name.."' (streaming?).", Duration=3}); return end
     local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health > 0) then return end
-    hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..cp.name, Duration=2})
+    hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content = "To "..cp.name, Duration=2})
 end })
 
 TPTab:CreateButton({ Name = "Auto TP through all", Callback = function()
