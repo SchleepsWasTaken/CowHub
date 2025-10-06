@@ -10,7 +10,7 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Window = Rayfield:CreateWindow({
     Name = "Gunung Nomaly Utility GUI",
     LoadingTitle = "Flight & TP Script",
-    LoadingSubtitle = "by Grok",
+    LoadingSubtitle = "by Babang Sekelep",
     ConfigurationSaving = { Enabled = false },
 })
 
