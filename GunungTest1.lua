@@ -1,30 +1,50 @@
--- === Rayfield loader (works on Delta/Xeno) ===
+-- === Rayfield universal loader (executor-friendly) ===
 local Rayfield
+
+local function fetch(url)
+    -- 1) Executor request APIs
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        local ok, res = pcall(req, {Url = url, Method = "GET"})
+        if ok and res and (res.Body or res.body) then
+            return res.Body or res.body
+        end
+    end
+    -- 2) Exploit-provided game:HttpGet
+    if typeof(game.HttpGet) == "function" then
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok and body then return body end
+    end
+    -- 3) Studio fallback (if HttpService is allowed)
+    local HttpService = game:GetService("HttpService")
+    local ok, body = pcall(function() return HttpService:GetAsync(url) end)
+    if ok and body then return body end
+    return nil
+end
+
 do
-    local src
-    local ok = pcall(function()
-        src = game:HttpGet("https://sirius.menu/rayfield")
-    end)
-    if ok and src and type(loadstring) == "function" then
+    local src = fetch("https://sirius.menu/rayfield")
+    if src and type(loadstring) == "function" then
         local f = loadstring(src)
-        local ok2, lib = pcall(f)
-        if ok2 and type(lib) == "table" and lib.CreateWindow then
+        local ok, lib = pcall(f)
+        if ok and type(lib) == "table" and lib.CreateWindow then
             Rayfield = lib
         end
     end
-    -- fallback to ReplicatedStorage module only if the remote fetch failed
+    -- Fallback to a local module only if remote fetch failed
     if not Rayfield then
         local RS = game:GetService("ReplicatedStorage")
-        local ok3, lib = pcall(function()
-            return require(RS:WaitForChild("Rayfield", 5))
-        end)
-        if ok3 and type(lib) == "table" and lib.CreateWindow then
+        local ok, lib = pcall(function() return require(RS:WaitForChild("Rayfield", 5)) end)
+        if ok and type(lib) == "table" and lib.CreateWindow then
             Rayfield = lib
         end
     end
 end
 
-assert(Rayfield and Rayfield.CreateWindow, "[Rayfield] Could not load")
+if not (Rayfield and Rayfield.CreateWindow) then
+    warn("[Rayfield] Could not load. Your executor blocked HTTP and no ReplicatedStorage module was found.")
+    return
+end
 
 
 ----------------------------------------------------------------------
