@@ -62,13 +62,15 @@ end
 -- Window & tabs
 ----------------------------------------------------------------------
 local Window   = Rayfield:CreateWindow({
-    Name = "Gunung DAUN KEN AJG",
-    LoadingTitle = "Flight & TP Script testing",
+    Name = "Gunung Nomaly Utility",
+    LoadingTitle = "Flight • Checkpoints • Teleport",
     LoadingSubtitle = "by Babang Sekelep",
     ConfigurationSaving = { Enabled = false },
 })
-local FlightTab = Window:CreateTab("Flight Controls", 1103511846)
+
+local FlightTab = Window:CreateTab("Flight / Player", 1103511846)
 local TPTab     = Window:CreateTab("Checkpoint Teleports", 1103511847)
+local ClickTab  = Window:CreateTab("Click / Tap Teleports", 1103511848)
 
 ----------------------------------------------------------------------
 -- Services & helpers
@@ -114,17 +116,12 @@ end
 local function applySpeed(hum)
     if not hum then return end
     local target = math.clamp(desiredSpeed, 16, SPEED_MAX)
-    -- Apply now
     hum.WalkSpeed = target
-
-    -- Keep it locked if something tries to change it
     table.insert(speedConns, hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
         if speedEnabled and math.abs(hum.WalkSpeed - target) > 0.1 then
             hum.WalkSpeed = target
         end
     end))
-
-    -- If state changes (ragdoll/jump/etc.), re-assert speed shortly after
     table.insert(speedConns, hum.StateChanged:Connect(function()
         if speedEnabled then
             task.delay(0.05, function()
@@ -142,32 +139,20 @@ local function setSpeedEnabled(on)
         applySpeed(hum)
         Rayfield:Notify({ Title = "Speed Boost ON", Content = ("Speed: %d"):format(math.floor(desiredSpeed)), Duration = 2 })
     else
-        if hum then hum.WalkSpeed = 16 end -- default Roblox walk speed
+        if hum then hum.WalkSpeed = 16 end
         Rayfield:Notify({ Title = "Speed Boost OFF", Duration = 2 })
     end
 end
 
--- Reapply on respawn
-game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(c)
+Players.LocalPlayer.CharacterAdded:Connect(function(c)
     if not speedEnabled then return end
     local hum = c:WaitForChild("Humanoid", 5)
     clearSpeedConns()
     applySpeed(hum)
 end)
 
--- UI
-FlightTab:CreateToggle({
-    Name = "Speed Boost (lock WalkSpeed)",
-    CurrentValue = false,
-    Callback = function(v) setSpeedEnabled(v) end
-})
-
-FlightTab:CreateSlider({
-    Name = "Run Speed",
-    Range = {16, SPEED_MAX},
-    Increment = 1,
-    Suffix = "stud/s",
-    CurrentValue = desiredSpeed,
+FlightTab:CreateToggle({ Name = "Speed Boost (lock WalkSpeed)", CurrentValue = false, Callback = function(v) setSpeedEnabled(v) end })
+FlightTab:CreateSlider({ Name = "Run Speed", Range = {16, SPEED_MAX}, Increment = 1, Suffix = "stud/s", CurrentValue = desiredSpeed,
     Callback = function(v)
         desiredSpeed = math.clamp(v, 16, SPEED_MAX)
         if speedEnabled then
@@ -178,12 +163,11 @@ FlightTab:CreateSlider({
     end
 })
 
-
 ----------------------------------------------------------------------
 -- Invincibility / Infinite Health (client-side lock)
 ----------------------------------------------------------------------
 local invincibleOn = false
-local godConns = {}  -- RBXScriptConnections to clean up
+local godConns = {}
 
 local function clearGodConns()
     for i = #godConns, 1, -1 do
@@ -197,12 +181,10 @@ local HUGE_HP = 1e9
 
 local function applyGodToHumanoid(hum)
     if not hum then return end
-    -- basic setup
     hum.BreakJointsOnDeath = false
     hum.MaxHealth = math.max(hum.MaxHealth or 0, HUGE_HP)
     hum.Health = hum.MaxHealth
 
-    -- invisible forcefield helps against some explosion/physics damage
     local ff = Character and Character:FindFirstChildOfClass("ForceField")
     if not ff and Character then
         ff = Instance.new("ForceField")
@@ -210,7 +192,6 @@ local function applyGodToHumanoid(hum)
         ff.Parent = Character
     end
 
-    -- auto-restore health whenever it drops
     table.insert(godConns, hum:GetPropertyChangedSignal("Health"):Connect(function()
         if not invincibleOn then return end
         if hum.Health < hum.MaxHealth then
@@ -220,12 +201,10 @@ local function applyGodToHumanoid(hum)
         end
     end))
 
-    -- if something actually forces death, instantly respawn (last resort)
     table.insert(godConns, hum.Died:Connect(function()
         if invincibleOn then
             task.defer(function()
-                -- Some games force kill server-side; a quick reload gets you back.
-                pcall(function() game:GetService("Players").LocalPlayer:LoadCharacter() end)
+                pcall(function() Players.LocalPlayer:LoadCharacter() end)
             end)
         end
     end))
@@ -235,19 +214,16 @@ local function setInvincibility(on)
     invincibleOn = on
     clearGodConns()
     if on then
-        -- (Re)apply right now
         local _, _, hum = getCharacter()
         Humanoid = hum or Humanoid
         applyGodToHumanoid(Humanoid)
     else
-        -- remove forcefield visual (if any)
         local ff = Character and Character:FindFirstChildOfClass("ForceField")
         if ff then pcall(function() ff:Destroy() end) end
     end
 end
 
--- Reapply on respawn if still enabled
-game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(c)
+Players.LocalPlayer.CharacterAdded:Connect(function(c)
     Character = c
     HRP = SafeWait(c, "HumanoidRootPart", 5)
     Humanoid = SafeWait(c, "Humanoid", 5)
@@ -257,19 +233,11 @@ game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(c)
     end
 end)
 
--- UI toggle
 FlightTab:CreateToggle({
     Name = "Invincibility (lock health)",
     CurrentValue = false,
-    Callback = function(v)
-        setInvincibility(v)
-        Rayfield:Notify({
-            Title = v and "Invincibility ON" or "Invincibility OFF",
-            Duration = 2
-        })
-    end
+    Callback = function(v) setInvincibility(v); Rayfield:Notify({ Title = v and "Invincibility ON" or "Invincibility OFF", Duration = 2 }) end
 })
-
 
 ----------------------------------------------------------------------
 -- Fly
@@ -288,7 +256,7 @@ local function startFlying()
 
     gyro = Instance.new("BodyGyro")
     gyro.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
-    gyro.P, gyro.D = 4500, 300 -- slightly snappier + less drift
+    gyro.P, gyro.D = 4500, 300
     gyro.Parent = HRP
 
     task.spawn(function()
@@ -302,12 +270,7 @@ local function startFlying()
             if UIS:IsKeyDown(Enum.KeyCode.D) then move += cf.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0,1,0) end
             if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move -= Vector3.new(0,1,0) end
-            if move.Magnitude > 0 then
-                move = move.Unit * flySpeed
-            else
-                move = Vector3.zero -- hard stop to prevent drift
-            end
-            vel.Velocity = move
+            vel.Velocity = (move.Magnitude > 0) and move.Unit * flySpeed or Vector3.zero
             local p = HRP.Position
             gyro.CFrame = CFrame.new(p, p + cf.LookVector)
             RunService.Heartbeat:Wait()
@@ -331,6 +294,9 @@ UIS.InputBegan:Connect(function(i, gp)
         if isFlying then stopFlying() else startFlying() end
     end
 end)
+
+FlightTab:CreateToggle({ Name = "Toggle Fly (F)", CurrentValue = false, Callback = function(v) if v then startFlying() else stopFlying() end end })
+FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment = 5, Suffix = "spd", CurrentValue = flySpeed, Callback = function(v) flySpeed = math.clamp(v, 10, MAX_SPEED) end })
 
 ----------------------------------------------------------------------
 -- Noclip (simple)
@@ -361,9 +327,6 @@ LP.CharacterAdded:Connect(function(c)
 end)
 if Humanoid then Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end) end
 
--- Flight tab UI
-FlightTab:CreateToggle({ Name = "Toggle Fly (F)", CurrentValue = false, Callback = function(v) if v then startFlying() else stopFlying() end end })
-FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment = 5, Suffix = "spd", CurrentValue = flySpeed, Callback = function(v) flySpeed = math.clamp(v, 10, MAX_SPEED) end })
 FlightTab:CreateToggle({ Name = "Noclip (no collisions)", CurrentValue = false, Callback = function(v) enableNoclip(v) end })
 FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 
@@ -491,7 +454,6 @@ local function ensureCustomSlider()
         end
     end)
 
-    -- defer first layout update so AbsoluteSize is valid
     task.defer(function()
         RunService.RenderStepped:Wait()
         setSliderDisplay(sliderValue or sliderMin or 0)
@@ -516,7 +478,6 @@ local cachedNames, cachedPos = {}, {}
 
 local function isNumericName(n) return string.match(n, "^%d+$") ~= nil end
 
--- Find the 'Checkpoints' container (case-insensitive, allows nesting)
 local function resolveFolder()
     local direct = Workspace:FindFirstChild(CP_FOLDER_NAME)
     if direct then return direct end
@@ -577,14 +538,11 @@ local function updateDetectedLabel()
     else labelDetected = TPTab:CreateLabel(text) end
 end
 
--- streaming-aware anchor determination with caching
 local function getOwnerByName(name)
     local folder = resolveFolder()
     if not folder then return nil end
-    -- prefer exact child
     local owner = folder:FindFirstChild(name)
     if owner then return owner end
-    -- deep fallback: any descendant named exactly <name>
     for _, d in ipairs(folder:GetDescendants()) do
         if d.Name == name then return d end
     end
@@ -642,7 +600,6 @@ local function awaitAnchorCF(name, timeout)
     return nil
 end
 
--- Deep-scan all descendants under Checkpoints
 local function scanWorldNames()
     local out = {}
     local folder = resolveFolder(); if not folder then return out end
@@ -651,7 +608,6 @@ local function scanWorldNames()
             table.insert(out, d.Name)
         end
     end
-    -- also include direct children with numeric names
     for _, child in ipairs(folder:GetChildren()) do
         if (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) and isNumericName(child.Name) then
             table.insert(out, child.Name)
@@ -690,9 +646,8 @@ end
 -- Quick Teleport buttons (1–20), created once and reconfigured
 ----------------------------------------------------------------------
 local MAX_QUICK = 20
-local quickButtons = {}      -- [i] = Rayfield Button control
-local quickActive  = {}      -- [i] = boolean (has checkpoint i right now)
-local quickInfoLabel = nil
+local quickButtons, quickActive = {}, {}
+local quickInfoLabel
 
 local function tryTP(cf)
     local now = time()
@@ -735,28 +690,20 @@ end
 
 local function reconfigureQuickButtons()
     buildQuickButtonsOnce()
-
     local available = {}
     for i = 1, MAX_QUICK do
         local name = tostring(i)
         local has = cpIndexByName[name] ~= nil
         quickActive[i] = has
         local display = has and ("TP to %s"):format(name) or ("[–] Slot %d"):format(i)
-
-        if quickButtons[i] and quickButtons[i].Set then
-            pcall(function() quickButtons[i]:Set(display) end)
-        end
+        if quickButtons[i] and quickButtons[i].Set then pcall(function() quickButtons[i]:Set(display) end) end
         if has then table.insert(available, name) end
     end
-
-    local text = (#available == 0)
-        and "Quick TP: No checkpoints 1–20 found yet."
-        or  ("Quick TP available: " .. table.concat(available, ", "))
-
+    local text = (#available == 0) and "Quick TP: No checkpoints 1–20 found yet."
+                 or ("Quick TP available: " .. table.concat(available, ", "))
     if quickInfoLabel then pcall(function() quickInfoLabel:Set(text) end) end
 end
 
--- Build the slots immediately; names activate after first refresh
 buildQuickButtonsOnce()
 
 ----------------------------------------------------------------------
@@ -776,9 +723,6 @@ local function refreshUI()
     updateDetectedLabel()
     rebuildSliderRange()
     if grew then saveCache() end
-    print("[CP] " .. (#checkpoints > 0 and table.concat(namesArray(), ", ") or "(none)"))
-
-    -- Update quick-button labels/availability
     reconfigureQuickButtons()
 end
 
@@ -816,11 +760,7 @@ TPTab:CreateButton({
     end
 })
 TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
-TPTab:CreateToggle({
-    Name = "Cache only (skip world scan)",
-    CurrentValue = false,
-    Callback = function(v) cacheOnly = v; refreshUI() end
-})
+TPTab:CreateToggle({ Name = "Cache only (skip world scan)", CurrentValue = false, Callback = function(v) cacheOnly = v; refreshUI() end })
 TPTab:CreateButton({ Name = "Save cache now", Callback = function() saveCache(); Rayfield:Notify({Title="Saved", Content="Names & positions cached", Duration=2}) end })
 TPTab:CreateButton({
     Name = "Clear cache",
@@ -848,19 +788,17 @@ TPTab:CreateButton({
 -- Build once
 refreshUI()
 
-
 ----------------------------------------------------------------------
 -- Auto-TP loop between checkpoints with interval slider (1–600 sec)
 ----------------------------------------------------------------------
 local autoTP_Enabled = false
-local autoTP_Interval = 30  -- seconds (1..600)
-local autoTP_Task     = nil
+local autoTP_Interval = 30
+local autoTP_Task
 
--- helper: try teleport to a numeric checkpoint name (string)
 local function tpToCheckpoint(name)
     local cf = awaitAnchorCF(name, 3.0)
     if not cf then
-        Rayfield:Notify({ Title = "Not ready", Content = "No parts streamed for '"..name.."' yet.", Duration = 2 })
+        Rayfield:Notify({ Title = "Not ready", Content = "No parts streamed for '"..name.."'.", Duration = 2 })
         return false
     end
     local _, hrp, hum = getCharacter()
@@ -869,10 +807,9 @@ local function tpToCheckpoint(name)
     return true
 end
 
--- UI: interval (seconds, up to 10 min)
 TPTab:CreateSlider({
     Name = "Auto-TP Interval (seconds)",
-    Range = { 1, 600 },  -- 10 minutes max
+    Range = { 1, 600 },
     Increment = 1,
     Suffix = "sec",
     CurrentValue = autoTP_Interval,
@@ -881,8 +818,6 @@ TPTab:CreateSlider({
         Rayfield:Notify({ Title = "Interval", Content = tostring(autoTP_Interval) .. " sec", Duration = 1 })
     end
 })
-
--- UI: start/stop the loop
 TPTab:CreateToggle({
     Name = "Auto-TP Between Checkpoints",
     CurrentValue = false,
@@ -893,28 +828,15 @@ TPTab:CreateToggle({
             Rayfield:Notify({ Title = "Auto-TP", Content = "Stopped.", Duration = 2 })
             return
         end
-
         Rayfield:Notify({ Title = "Auto-TP", Content = ("Running every %ds"):format(autoTP_Interval), Duration = 2 })
-
-        -- run loop (lightweight; reuses live checkpoint list each cycle)
         autoTP_Task = task.spawn(function()
             while autoTP_Enabled do
-                -- if no checkpoints, wait a bit and retry
-                if #checkpoints == 0 then
-                    task.wait(2)
-                    continue
-                end
-
-                -- iterate in numeric order using the current list
+                if #checkpoints == 0 then task.wait(2) continue end
                 for _, cp in ipairs(checkpoints) do
                     if not autoTP_Enabled then break end
-                    local name = cp.name -- numeric string like "1","2",...
-                    tpToCheckpoint(name) -- best effort; handles streaming
-                    -- sleep the currently selected interval (seconds)
+                    tpToCheckpoint(cp.name)
                     local t0 = time()
-                    while autoTP_Enabled and (time() - t0) < autoTP_Interval do
-                        task.wait(0.1)
-                    end
+                    while autoTP_Enabled and (time() - t0) < autoTP_Interval do task.wait(0.1) end
                 end
             end
         end)
@@ -922,32 +844,10 @@ TPTab:CreateToggle({
 })
 
 ----------------------------------------------------------------------
--- Watch for folder/children (rescan when new stuff streams)
+-- CLICK / TAP TELEPORTS TAB (moved out of checkpoint tab)
 ----------------------------------------------------------------------
-local folderChildConn
-Workspace.ChildAdded:Connect(function(ch)
-    if string.lower(ch.Name) == string.lower(CP_FOLDER_NAME) then
-        task.wait(0.05); refreshUI()
-        if folderChildConn then folderChildConn:Disconnect() end
-        folderChildConn = ch.DescendantAdded:Connect(function(c2)
-            if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
-                task.wait(0.05); refreshUI()
-            end
-        end)
-    end
-end)
-local f = resolveFolder()
-if f then
-    folderChildConn = f.DescendantAdded:Connect(function(c2)
-        if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
-            task.wait(0.05); refreshUI()
-        end
-    end)
-end
+ClickTab:CreateLabel("Checkpoint Click TP")
 
-----------------------------------------------------------------------
--- Optional: Tap/Click to TP directly on checkpoint parts
-----------------------------------------------------------------------
 local function findOwnerUnderFolder(inst, folder)
     local cur = inst
     while cur and cur ~= Workspace do
@@ -963,14 +863,13 @@ local function rayFromScreen(pos)
     local r = cam:ViewportPointToRay(pos.X, pos.Y)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
-    local char = LP.Character
-    params.FilterDescendantsInstances = char and { char } or {}
+    params.FilterDescendantsInstances = { LP.Character }
     return Workspace:Raycast(r.Origin, r.Direction * 2000, params)
 end
 
 local touchConn, mouseConn
-TPTab:CreateToggle({
-    Name = "Tap-to-TP CHECKPOINTS(mobile GAPERLU KL DI PC)",
+ClickTab:CreateToggle({
+    Name = "Tap-to-TP CHECKPOINTS (mobile)",
     CurrentValue = false,
     Callback = function(v)
         if touchConn then touchConn:Disconnect() touchConn = nil end
@@ -988,7 +887,7 @@ TPTab:CreateToggle({
         end)
     end
 })
-TPTab:CreateToggle({
+ClickTab:CreateToggle({
     Name = "Click-to-TP CHECKPOINTS (PC)",
     CurrentValue = false,
     Callback = function(v)
@@ -1011,9 +910,8 @@ TPTab:CreateToggle({
     end
 })
 
-----------------------------------------------------------------------
--- TP ANYWHERE toggles (mobile + PC) — like your checkpoint toggles
-----------------------------------------------------------------------
+ClickTab:CreateLabel("Anywhere Click TP")
+
 local tpAny_TouchConn, tpAny_MouseConn
 local TP_ANY_OFFSET_Y = 5
 local TP_ANY_MAX_DIST = 3000
@@ -1042,8 +940,7 @@ local function tpToWorldPoint(p3)
     hrp.CFrame = CFrame.new(pos, pos + dir)
 end
 
--- Mobile toggle
-TPTab:CreateToggle({
+ClickTab:CreateToggle({
     Name = "Tap-to-TP ANYWHERE (mobile)",
     CurrentValue = false,
     Callback = function(on)
@@ -1061,9 +958,7 @@ TPTab:CreateToggle({
         end)
     end
 })
-
--- PC toggle
-TPTab:CreateToggle({
+ClickTab:CreateToggle({
     Name = "Click-to-TP ANYWHERE (PC)",
     CurrentValue = false,
     Callback = function(on)
@@ -1084,12 +979,12 @@ TPTab:CreateToggle({
     end
 })
 
-
 ----------------------------------------------------------------------
--- Window visibility toggle
+-- Window visibility toggle on all tabs
 ----------------------------------------------------------------------
 local function addVisibilityToggle(tab)
     tab:CreateToggle({ Name = "Toggle GUI Visibility", CurrentValue = true, Callback = function(v) Rayfield:ToggleWindow(v) end })
 end
 addVisibilityToggle(FlightTab)
 addVisibilityToggle(TPTab)
+addVisibilityToggle(ClickTab)
