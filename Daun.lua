@@ -970,7 +970,7 @@ end
 
 local touchConn, mouseConn
 TPTab:CreateToggle({
-    Name = "Tap-to-TP (mobile)",
+    Name = "Tap-to-TP CHECKPOINTS(mobile GAPERLU KL DI PC)",
     CurrentValue = false,
     Callback = function(v)
         if touchConn then touchConn:Disconnect() touchConn = nil end
@@ -989,7 +989,7 @@ TPTab:CreateToggle({
     end
 })
 TPTab:CreateToggle({
-    Name = "Click-to-TP (PC)",
+    Name = "Click-to-TP CHECKPOINTS (PC)",
     CurrentValue = false,
     Callback = function(v)
         if mouseConn then mouseConn:Disconnect() mouseConn = nil end
