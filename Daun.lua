@@ -1012,6 +1012,80 @@ TPTab:CreateToggle({
 })
 
 ----------------------------------------------------------------------
+-- TP ANYWHERE toggles (mobile + PC) — like your checkpoint toggles
+----------------------------------------------------------------------
+local tpAny_TouchConn, tpAny_MouseConn
+local TP_ANY_OFFSET_Y = 5
+local TP_ANY_MAX_DIST = 3000
+local lastTPAnywhere = 0
+
+local function rayFromScreen_Anywhere(pos)
+    local cam = Workspace.CurrentCamera
+    if not cam then return nil end
+    local r = cam:ViewportPointToRay(pos.X, pos.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    params.FilterDescendantsInstances = { LP.Character }
+    return Workspace:Raycast(r.Origin, r.Direction * TP_ANY_MAX_DIST, params)
+end
+
+local function tpToWorldPoint(p3)
+    if time() - lastTPAnywhere < 0.2 then return end
+    lastTPAnywhere = time()
+    local _, hrp, hum = getCharacter()
+    if not (hrp and hum and hum.Health > 0) then return end
+    local cam = Workspace.CurrentCamera
+    local pos = Vector3.new(p3.X, math.clamp(p3.Y + TP_ANY_OFFSET_Y, -5000, 10000), p3.Z)
+    local look = cam and cam.CFrame.LookVector or hrp.CFrame.LookVector
+    local dir = Vector3.new(look.X, 0, look.Z)
+    if dir.Magnitude < 0.05 then dir = Vector3.new(0,0,-1) end
+    hrp.CFrame = CFrame.new(pos, pos + dir)
+end
+
+-- Mobile toggle
+TPTab:CreateToggle({
+    Name = "Tap-to-TP ANYWHERE (mobile)",
+    CurrentValue = false,
+    Callback = function(on)
+        if tpAny_TouchConn then tpAny_TouchConn:Disconnect(); tpAny_TouchConn = nil end
+        if not on then return end
+        tpAny_TouchConn = UIS.TouchTap:Connect(function(positions, processed)
+            if processed then return end
+            local p = positions and positions[1]; if not p then return end
+            local hit = rayFromScreen_Anywhere(p)
+            if hit and hit.Position then
+                tpToWorldPoint(hit.Position)
+            else
+                Rayfield:Notify({ Title="No surface", Content="Couldn't find a spot.", Duration=1.2 })
+            end
+        end)
+    end
+})
+
+-- PC toggle
+TPTab:CreateToggle({
+    Name = "Click-to-TP ANYWHERE (PC)",
+    CurrentValue = false,
+    Callback = function(on)
+        if tpAny_MouseConn then tpAny_MouseConn:Disconnect(); tpAny_MouseConn = nil end
+        if not on then return end
+        tpAny_MouseConn = UIS.InputBegan:Connect(function(input, gp)
+            if gp then return end
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                local m = UIS:GetMouseLocation()
+                local hit = rayFromScreen_Anywhere(Vector2.new(m.X, m.Y))
+                if hit and hit.Position then
+                    tpToWorldPoint(hit.Position)
+                else
+                    Rayfield:Notify({ Title="No surface", Content="Couldn't find a spot.", Duration=1.2 })
+                end
+            end
+        end)
+    end
+})
+
+
+----------------------------------------------------------------------
 -- Window visibility toggle
 ----------------------------------------------------------------------
 local function addVisibilityToggle(tab)
