@@ -848,6 +848,79 @@ TPTab:CreateButton({
 -- Build once
 refreshUI()
 
+
+----------------------------------------------------------------------
+-- Auto-TP loop between checkpoints with interval slider (1–600 sec)
+----------------------------------------------------------------------
+local autoTP_Enabled = false
+local autoTP_Interval = 30  -- seconds (1..600)
+local autoTP_Task     = nil
+
+-- helper: try teleport to a numeric checkpoint name (string)
+local function tpToCheckpoint(name)
+    local cf = awaitAnchorCF(name, 3.0)
+    if not cf then
+        Rayfield:Notify({ Title = "Not ready", Content = "No parts streamed for '"..name.."' yet.", Duration = 2 })
+        return false
+    end
+    local _, hrp, hum = getCharacter()
+    if not (hrp and hum and hum.Health > 0) then return false end
+    hrp.CFrame = cf * CFrame.new(0, 5, 0)
+    return true
+end
+
+-- UI: interval (seconds, up to 10 min)
+TPTab:CreateSlider({
+    Name = "Auto-TP Interval (seconds)",
+    Range = { 1, 600 },  -- 10 minutes max
+    Increment = 1,
+    Suffix = "sec",
+    CurrentValue = autoTP_Interval,
+    Callback = function(v)
+        autoTP_Interval = math.clamp(v, 1, 600)
+        Rayfield:Notify({ Title = "Interval", Content = tostring(autoTP_Interval) .. " sec", Duration = 1 })
+    end
+})
+
+-- UI: start/stop the loop
+TPTab:CreateToggle({
+    Name = "Auto-TP Between Checkpoints",
+    CurrentValue = false,
+    Callback = function(on)
+        autoTP_Enabled = on
+        if not on then
+            autoTP_Task = nil
+            Rayfield:Notify({ Title = "Auto-TP", Content = "Stopped.", Duration = 2 })
+            return
+        end
+
+        Rayfield:Notify({ Title = "Auto-TP", Content = ("Running every %ds"):format(autoTP_Interval), Duration = 2 })
+
+        -- run loop (lightweight; reuses live checkpoint list each cycle)
+        autoTP_Task = task.spawn(function()
+            while autoTP_Enabled do
+                -- if no checkpoints, wait a bit and retry
+                if #checkpoints == 0 then
+                    task.wait(2)
+                    continue
+                end
+
+                -- iterate in numeric order using the current list
+                for _, cp in ipairs(checkpoints) do
+                    if not autoTP_Enabled then break end
+                    local name = cp.name -- numeric string like "1","2",...
+                    tpToCheckpoint(name) -- best effort; handles streaming
+                    -- sleep the currently selected interval (seconds)
+                    local t0 = time()
+                    while autoTP_Enabled and (time() - t0) < autoTP_Interval do
+                        task.wait(0.1)
+                    end
+                end
+            end
+        end)
+    end
+})
+
 ----------------------------------------------------------------------
 -- Watch for folder/children (rescan when new stuff streams)
 ----------------------------------------------------------------------
