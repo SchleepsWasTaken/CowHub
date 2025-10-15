@@ -472,18 +472,14 @@ local function rebuildSliderRange()
 end
 
 ----------------------------------------------------------------------
--- Quick Teleport buttons (1–20), only for existing checkpoints
+-- Quick Teleport buttons (1–20), created once and reconfigured
 ----------------------------------------------------------------------
 local MAX_QUICK = 20
-local quickBtnObjs, quickInfoLabel = {}, nil
+local quickButtons = {}      -- [i] = Rayfield Button control
+local quickActive  = {}      -- [i] = boolean (has checkpoint i right now)
+local quickInfoLabel = nil
 
-local function destroyQuickButtons()
-    for _, obj in ipairs(quickBtnObjs) do
-        pcall(function() obj:Destroy() end)
-    end
-    quickBtnObjs = {}
-end
-
+-- TP cooldown helper
 local function tryTP(cf)
     local now = time()
     _G.__GN_LAST_TP = _G.__GN_LAST_TP or 0
@@ -495,128 +491,60 @@ local function tryTP(cf)
     end
 end
 
-local function rebuildQuickButtons()
-    destroyQuickButtons()
+-- Button callback factory (no destroy; reuses same callback)
+local function onQuickClick(i)
+    local name = tostring(i)
+    if not quickActive[i] then
+        Rayfield:Notify({ Title = "Not available", Content = ("Checkpoint %s not found (1–20)."):format(name), Duration = 2 })
+        return
+    end
+    local cf = awaitAnchorCF(name, 3.0)
+    if cf then
+        tryTP(cf)
+        Rayfield:Notify({ Title = "Teleported", Content = "To " .. name, Duration = 2 })
+    else
+        Rayfield:Notify({ Title = "Not ready", Content = "No parts streamed for '"..name.."' yet.", Duration = 2 })
+    end
+end
+
+-- Build once
+local function buildQuickButtonsOnce()
+    if #quickButtons > 0 then return end
+    for i = 1, MAX_QUICK do
+        -- start “inactive”; will be renamed/activated by refresh
+        local btn = TPTab:CreateButton({
+            Name = ("[–] Slot %d"):format(i),
+            Callback = function() onQuickClick(i) end
+        })
+        quickButtons[i] = btn
+        quickActive[i]  = false
+    end
+    quickInfoLabel = TPTab:CreateLabel("Quick TP: building…")
+end
+
+-- Reconfigure text + active flags without destroying the controls
+local function reconfigureQuickButtons()
+    buildQuickButtonsOnce()
 
     local available = {}
     for i = 1, MAX_QUICK do
         local name = tostring(i)
-        if cpIndexByName[name] then
-            table.insert(available, name)
-            local btn = TPTab:CreateButton({
-                Name = ("TP to %s"):format(name),
-                Callback = function()
-                    local cf = awaitAnchorCF(name, 3.0)
-                    if cf then
-                        tryTP(cf)
-                        Rayfield:Notify({ Title = "Teleported", Content = "To " .. name, Duration = 2 })
-                    else
-                        Rayfield:Notify({ Title = "Not ready", Content = "No parts streamed for '"..name.."' yet.", Duration = 2 })
-                    end
-                end
-            })
-            table.insert(quickBtnObjs, btn)
+        local has = cpIndexByName[name] ~= nil
+        quickActive[i] = has
+        local display = has and ("TP to %s"):format(name) or ("[–] Slot %d"):format(i)
+
+        -- Rayfield buttons support :Set("new text")
+        if quickButtons[i] and quickButtons[i].Set then
+            pcall(function() quickButtons[i]:Set(display) end)
         end
+        if has then table.insert(available, name) end
     end
 
-    local text
-    if #available == 0 then
-        text = "Quick TP: No checkpoints 1–20 found yet."
-    else
-        text = "Quick TP available: " .. table.concat(available, ", ")
-    end
-    if quickInfoLabel then
-        pcall(function() quickInfoLabel:Set(text) end)
-    else
-        quickInfoLabel = TPTab:CreateLabel(text)
-    end
-end
+    local text = (#available == 0)
+        and "Quick TP: No checkpoints 1–20 found yet."
+        or  ("Quick TP available: " .. table.concat(available, ", "))
 
-local function refreshUI()
-    if refreshDebounce then return end
-    refreshDebounce = true
-    task.delay(0.2, function() refreshDebounce = false end)
-
-    local world = cacheOnly and {} or scanWorldNames()
-    local merged = unionNames(cachedNames, world)
-    local grew = (#merged > #cachedNames)
-    cachedNames = merged
-    sortAndIndex(cachedNames)
-    updateDetectedLabel()
-    rebuildSliderRange()
-    if grew then saveCache() end
-    print("[CP] " .. (#checkpoints > 0 and table.concat(namesArray(), ", ") or "(none)"))
-
-    -- Build / update quick buttons based on current availability (1..20)
-    rebuildQuickButtons()
-end
-
--- Buttons (use awaitAnchorCF)
-TPTab:CreateButton({
-    Name = "Teleport (selected)",
-    Callback = function()
-        local num = _G.__GN_SelectedNumeric
-        if not num then Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2}); return end
-        selectedName = tostring(num)
-        local cf = awaitAnchorCF(selectedName, 4.0)
-        if not cf then Rayfield:Notify({Title="No anchor", Content="No part in '"..selectedName.."' yet (streaming).", Duration=2}); return end
-        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
-        hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..selectedName, Duration=2})
-    end
-})
-TPTab:CreateButton({
-    Name = "Auto TP through all (save positions)",
-    Callback = function()
-        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
-        for _, cp in ipairs(checkpoints) do
-            local name = cp.name
-            local cf = awaitAnchorCF(name, 2.0)
-            if cf then
-                hrp.CFrame = cf * CFrame.new(0,5,0)
-                cachedPos[name] = {x=cf.X, y=cf.Y, z=cf.Z}; saveCache()
-                task.wait(1)
-            else
-                warn("[AutoTP] Skipped "..name.." (not streamed and no cached position)")
-            end
-        end
-        Rayfield:Notify({Title="Auto TP Complete", Duration=3})
-    end
-})
-TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
-TPTab:CreateToggle({
-    Name = "Cache only (skip world scan)",
-    CurrentValue = false,
-    Callback = function(v) cacheOnly = v; refreshUI() end
-})
-TPTab:CreateButton({ Name = "Save cache now", Callback = function() saveCache(); Rayfield:Notify({Title="Saved", Content="Names & positions cached", Duration=2}) end })
-TPTab:CreateButton({
-    Name = "Clear cache",
-    Callback = function()
-        if FS.has and isfile(FS.path) then pcall(function() writefile(FS.path, HttpService:JSONEncode({names={}, positions={}})) end) end
-        cachedNames, cachedPos = {}, {}; refreshUI()
-        Rayfield:Notify({Title="Cleared", Content="Checkpoint cache cleared", Duration=2})
-    end
-})
-
--- Build once
-refreshUI()
-
--- Watch for folder/children
-local folderConn, folderChildConn
-folderConn = Workspace.ChildAdded:Connect(function(ch)
-    if ch.Name == CP_FOLDER_NAME then
-        task.wait(0.05); refreshUI()
-        if folderChildConn then folderChildConn:Disconnect() end
-        folderChildConn = ch.ChildAdded:Connect(function(c2)
-            if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then task.wait(0.05); refreshUI() end
-        end)
-    end
-end)
-local f = resolveFolder()
-if f then
-    folderChildConn = f.ChildAdded:Connect(function(c2)
-        if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then task.wait(0.05); refreshUI() end
-    end)
+    if quickInfoLabel then pcall(function() quickInfoLabel:Set(text) end) end
 end
 
 ----------------------------------------------------------------------
