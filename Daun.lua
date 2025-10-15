@@ -96,6 +96,90 @@ end
 local Character, HRP, Humanoid = getCharacter()
 
 ----------------------------------------------------------------------
+-- Speed Boost (run faster, up to 300) + lock against resets
+----------------------------------------------------------------------
+local SPEED_MAX = 300
+local speedEnabled = false
+local desiredSpeed = 100
+local speedConns = {}
+
+local function clearSpeedConns()
+    for i = #speedConns, 1, -1 do
+        local c = speedConns[i]
+        if typeof(c) == "RBXScriptConnection" then pcall(function() c:Disconnect() end) end
+        speedConns[i] = nil
+    end
+end
+
+local function applySpeed(hum)
+    if not hum then return end
+    local target = math.clamp(desiredSpeed, 16, SPEED_MAX)
+    -- Apply now
+    hum.WalkSpeed = target
+
+    -- Keep it locked if something tries to change it
+    table.insert(speedConns, hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if speedEnabled and math.abs(hum.WalkSpeed - target) > 0.1 then
+            hum.WalkSpeed = target
+        end
+    end))
+
+    -- If state changes (ragdoll/jump/etc.), re-assert speed shortly after
+    table.insert(speedConns, hum.StateChanged:Connect(function()
+        if speedEnabled then
+            task.delay(0.05, function()
+                if speedEnabled and hum then hum.WalkSpeed = target end
+            end)
+        end
+    end))
+end
+
+local function setSpeedEnabled(on)
+    speedEnabled = on
+    clearSpeedConns()
+    local _, _, hum = getCharacter()
+    if on then
+        applySpeed(hum)
+        Rayfield:Notify({ Title = "Speed Boost ON", Content = ("Speed: %d"):format(math.floor(desiredSpeed)), Duration = 2 })
+    else
+        if hum then hum.WalkSpeed = 16 end -- default Roblox walk speed
+        Rayfield:Notify({ Title = "Speed Boost OFF", Duration = 2 })
+    end
+end
+
+-- Reapply on respawn
+game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(c)
+    if not speedEnabled then return end
+    local hum = c:WaitForChild("Humanoid", 5)
+    clearSpeedConns()
+    applySpeed(hum)
+end)
+
+-- UI
+FlightTab:CreateToggle({
+    Name = "Speed Boost (lock WalkSpeed)",
+    CurrentValue = false,
+    Callback = function(v) setSpeedEnabled(v) end
+})
+
+FlightTab:CreateSlider({
+    Name = "Run Speed",
+    Range = {16, SPEED_MAX},
+    Increment = 1,
+    Suffix = "stud/s",
+    CurrentValue = desiredSpeed,
+    Callback = function(v)
+        desiredSpeed = math.clamp(v, 16, SPEED_MAX)
+        if speedEnabled then
+            local _, _, hum = getCharacter()
+            if hum then hum.WalkSpeed = desiredSpeed end
+            Rayfield:Notify({ Title = "Speed", Content = tostring(desiredSpeed), Duration = 1 })
+        end
+    end
+})
+
+
+----------------------------------------------------------------------
 -- Invincibility / Infinite Health (client-side lock)
 ----------------------------------------------------------------------
 local invincibleOn = false
