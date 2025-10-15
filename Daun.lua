@@ -62,8 +62,8 @@ end
 -- Window & tabs
 ----------------------------------------------------------------------
 local Window   = Rayfield:CreateWindow({
-    Name = "Gunung Nomaly Utility GUI",
-    LoadingTitle = "Flight & TP Script",
+    Name = "Gunung DAUN KEN AJG",
+    LoadingTitle = "Flight & TP Script testing",
     LoadingSubtitle = "by Babang Sekelep",
     ConfigurationSaving = { Enabled = false },
 })
@@ -94,6 +94,98 @@ local function getCharacter()
 end
 
 local Character, HRP, Humanoid = getCharacter()
+
+----------------------------------------------------------------------
+-- Invincibility / Infinite Health (client-side lock)
+----------------------------------------------------------------------
+local invincibleOn = false
+local godConns = {}  -- RBXScriptConnections to clean up
+
+local function clearGodConns()
+    for i = #godConns, 1, -1 do
+        local c = godConns[i]
+        if typeof(c) == "RBXScriptConnection" then pcall(function() c:Disconnect() end) end
+        godConns[i] = nil
+    end
+end
+
+local HUGE_HP = 1e9
+
+local function applyGodToHumanoid(hum)
+    if not hum then return end
+    -- basic setup
+    hum.BreakJointsOnDeath = false
+    hum.MaxHealth = math.max(hum.MaxHealth or 0, HUGE_HP)
+    hum.Health = hum.MaxHealth
+
+    -- invisible forcefield helps against some explosion/physics damage
+    local ff = Character and Character:FindFirstChildOfClass("ForceField")
+    if not ff and Character then
+        ff = Instance.new("ForceField")
+        ff.Visible = false
+        ff.Parent = Character
+    end
+
+    -- auto-restore health whenever it drops
+    table.insert(godConns, hum:GetPropertyChangedSignal("Health"):Connect(function()
+        if not invincibleOn then return end
+        if hum.Health < hum.MaxHealth then
+            hum.MaxHealth = math.max(hum.MaxHealth, HUGE_HP)
+            hum.Health = hum.MaxHealth
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        end
+    end))
+
+    -- if something actually forces death, instantly respawn (last resort)
+    table.insert(godConns, hum.Died:Connect(function()
+        if invincibleOn then
+            task.defer(function()
+                -- Some games force kill server-side; a quick reload gets you back.
+                pcall(function() game:GetService("Players").LocalPlayer:LoadCharacter() end)
+            end)
+        end
+    end))
+end
+
+local function setInvincibility(on)
+    invincibleOn = on
+    clearGodConns()
+    if on then
+        -- (Re)apply right now
+        local _, _, hum = getCharacter()
+        Humanoid = hum or Humanoid
+        applyGodToHumanoid(Humanoid)
+    else
+        -- remove forcefield visual (if any)
+        local ff = Character and Character:FindFirstChildOfClass("ForceField")
+        if ff then pcall(function() ff:Destroy() end) end
+    end
+end
+
+-- Reapply on respawn if still enabled
+game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(c)
+    Character = c
+    HRP = SafeWait(c, "HumanoidRootPart", 5)
+    Humanoid = SafeWait(c, "Humanoid", 5)
+    if invincibleOn then
+        clearGodConns()
+        applyGodToHumanoid(Humanoid)
+    end
+end)
+
+-- UI toggle
+FlightTab:CreateToggle({
+    Name = "Invincibility (lock health)",
+    CurrentValue = false,
+    Callback = function(v)
+        setInvincibility(v)
+        Rayfield:Notify({
+            Title = v and "Invincibility ON" or "Invincibility OFF",
+            Duration = 2
+        })
+    end
+})
+
 
 ----------------------------------------------------------------------
 -- Fly
