@@ -19,23 +19,20 @@ local function fetch(url)
     end
 
     -- 2) Exploit-provided game:HttpGet (wrapped)
-    if typeof(game.HttpGet) == "function" then
-        local ok, body = pcall(function()
-            return game:HttpGet(url)
-        end)
-        if ok and body then return body end
-    end
-
-    -- 3) Studio/HTTPService fallback (wrapped)
-    local HttpService = game:GetService("HttpService")
     local ok, body = pcall(function()
-        return HttpService:GetAsync(url)
+        return game:HttpGet(url)
     end)
     if ok and body then return body end
 
+    -- 3) Studio/HTTPService fallback (wrapped)
+    local HttpService = game:GetService("HttpService")
+    local ok3, body3 = pcall(function()
+        return HttpService:GetAsync(url)
+    end)
+    if ok3 and body3 then return body3 end
+
     return nil
 end
-
 
 do
     local src = fetch("https://sirius.menu/rayfield")
@@ -60,7 +57,6 @@ if not (Rayfield and Rayfield.CreateWindow) then
     warn("[Rayfield] Could not load. Your executor blocked HTTP and no ReplicatedStorage module was found.")
     return
 end
-
 
 ----------------------------------------------------------------------
 -- Window & tabs
@@ -116,7 +112,7 @@ local function startFlying()
 
     gyro = Instance.new("BodyGyro")
     gyro.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
-    gyro.P, gyro.D = 3000, 500
+    gyro.P, gyro.D = 4500, 300 -- slightly snappier + less drift
     gyro.Parent = HRP
 
     task.spawn(function()
@@ -130,14 +126,18 @@ local function startFlying()
             if UIS:IsKeyDown(Enum.KeyCode.D) then move += cf.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0,1,0) end
             if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move -= Vector3.new(0,1,0) end
-            if move.Magnitude > 0 then move = move.Unit * flySpeed end
+            if move.Magnitude > 0 then
+                move = move.Unit * flySpeed
+            else
+                move = Vector3.zero -- hard stop to prevent drift
+            end
             vel.Velocity = move
             local p = HRP.Position
             gyro.CFrame = CFrame.new(p, p + cf.LookVector)
             RunService.Heartbeat:Wait()
         end
     end)
-    Rayfield:Notify({ Title = "Flying Enabled", Content = "WASD / Space / Shift", Duration = 2 })
+    Rayfield:Notify({ Title = "Flying Enabled", Content = "WASD / Space / Shift (Hotkey: F)", Duration = 2 })
 end
 
 local function stopFlying()
@@ -157,7 +157,7 @@ UIS.InputBegan:Connect(function(i, gp)
 end)
 
 ----------------------------------------------------------------------
--- Noclip
+-- Noclip (simple)
 ----------------------------------------------------------------------
 local noclipOn, noclipConn = false, nil
 local function setCollide(on)
@@ -186,8 +186,8 @@ end)
 if Humanoid then Humanoid.Died:Connect(function() stopFlying(); enableNoclip(false) end) end
 
 -- Flight tab UI
-FlightTab:CreateToggle({ Name = "Toggle Fly", CurrentValue = false, Callback = function(v) if v then startFlying() else stopFlying() end end })
-FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment = 5, Suffix = "speed", CurrentValue = flySpeed, Callback = function(v) flySpeed = v end })
+FlightTab:CreateToggle({ Name = "Toggle Fly (F)", CurrentValue = false, Callback = function(v) if v then startFlying() else stopFlying() end end })
+FlightTab:CreateSlider({ Name = "Fly Speed", Range = {10, MAX_SPEED}, Increment = 5, Suffix = "spd", CurrentValue = flySpeed, Callback = function(v) flySpeed = math.clamp(v, 10, MAX_SPEED) end })
 FlightTab:CreateToggle({ Name = "Noclip (no collisions)", CurrentValue = false, Callback = function(v) enableNoclip(v) end })
 FlightTab:CreateLabel("Tip: Space=up, Shift=down. Camera decides direction.")
 
@@ -204,6 +204,7 @@ end
 
 local function setSliderDisplay(valNumber)
     sliderValue = valNumber
+    if not (bar and knob and sliderFrame and title) then return end
     local pct = valueToPct(valNumber)
     local width = bar.AbsoluteSize.X
     local left  = bar.AbsolutePosition.X
@@ -222,9 +223,10 @@ local function ensureCustomSlider()
     sliderGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     sliderGui.Parent = pg
 
+    local isSmall = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.X < 700
     sliderFrame = Instance.new("Frame")
-    sliderFrame.Size = UDim2.new(0, 420, 0, 64)
-    sliderFrame.Position = UDim2.new(0, 24, 1, -110)  -- bottom-left anchor
+    sliderFrame.Size = isSmall and UDim2.new(0.9, 0, 0, 64) or UDim2.new(0, 420, 0, 64)
+    sliderFrame.Position = isSmall and UDim2.new(0.05, 0, 1, -110) or UDim2.new(0, 24, 1, -110)
     sliderFrame.BackgroundColor3 = Color3.fromRGB(20,20,20)
     sliderFrame.BackgroundTransparency = 0.2
     sliderFrame.BorderSizePixel = 0
@@ -312,6 +314,12 @@ local function ensureCustomSlider()
             setFromX((input.Position and input.Position.X) or UIS:GetMouseLocation().X, _G.__GN_NamesList or {})
         end
     end)
+
+    -- defer first layout update so AbsoluteSize is valid
+    task.defer(function()
+        RunService.RenderStepped:Wait()
+        setSliderDisplay(sliderValue or sliderMin or 0)
+    end)
 end
 
 ----------------------------------------------------------------------
@@ -321,7 +329,6 @@ local CP_FOLDER_NAME = "Checkpoints"
 local checkpoints, cpIndexByName = {}, {}
 local selectedName
 local labelDetected
-local folderConn, folderChildConn
 local refreshDebounce = false
 local cacheOnly = false
 
@@ -332,7 +339,18 @@ local FS = {
 local cachedNames, cachedPos = {}, {}
 
 local function isNumericName(n) return string.match(n, "^%d+$") ~= nil end
-local function resolveFolder() return Workspace:FindFirstChild(CP_FOLDER_NAME) end
+
+-- Find the 'Checkpoints' container (case-insensitive, allows nesting)
+local function resolveFolder()
+    local direct = Workspace:FindFirstChild(CP_FOLDER_NAME)
+    if direct then return direct end
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if (inst:IsA("Folder") or inst:IsA("Model")) and string.lower(inst.Name) == string.lower(CP_FOLDER_NAME) then
+            return inst
+        end
+    end
+    return nil
+end
 
 local function loadCache()
     if not FS.has or not isfile(FS.path) then return end
@@ -365,6 +383,7 @@ local function namesArray()
     for i, cp in ipairs(checkpoints) do t[i] = cp.name end
     return t
 end
+
 local function sortAndIndex(byNames)
     table.sort(byNames, function(a,b) return tonumber(a) < tonumber(b) end)
     checkpoints, cpIndexByName = {}, {}
@@ -375,6 +394,7 @@ local function sortAndIndex(byNames)
         cpIndexByName[name] = #checkpoints
     end
 end
+
 local function updateDetectedLabel()
     local text = (#checkpoints > 0) and ("Detected Checkpoints: " .. table.concat(namesArray(), ", ")) or "No checkpoints yet."
     if labelDetected and labelDetected.Set then pcall(function() labelDetected:Set(text) end)
@@ -384,8 +404,17 @@ end
 -- streaming-aware anchor determination with caching
 local function getOwnerByName(name)
     local folder = resolveFolder()
-    return folder and folder:FindFirstChild(name) or nil
+    if not folder then return nil end
+    -- prefer exact child
+    local owner = folder:FindFirstChild(name)
+    if owner then return owner end
+    -- deep fallback: any descendant named exactly <name>
+    for _, d in ipairs(folder:GetDescendants()) do
+        if d.Name == name then return d end
+    end
+    return nil
 end
+
 local function gatherParts(owner)
     local parts = {}
     if not owner then return parts end
@@ -395,6 +424,7 @@ local function gatherParts(owner)
     end
     return parts
 end
+
 local function chooseBestCFrame(parts)
     local filtered = {}
     for _, p in ipairs(parts) do if p.Position.Magnitude > 5 then table.insert(filtered, p) end end
@@ -414,6 +444,7 @@ local function chooseBestCFrame(parts)
     end
     return best and best.CFrame or nil
 end
+
 local function awaitAnchorCF(name, timeout)
     local pos = cachedPos[name]
     if pos then return CFrame.new(pos.x, pos.y, pos.z) end
@@ -435,9 +466,16 @@ local function awaitAnchorCF(name, timeout)
     return nil
 end
 
+-- Deep-scan all descendants under Checkpoints
 local function scanWorldNames()
     local out = {}
     local folder = resolveFolder(); if not folder then return out end
+    for _, d in ipairs(folder:GetDescendants()) do
+        if (d:IsA("Folder") or d:IsA("Model") or d:IsA("BasePart")) and isNumericName(d.Name) then
+            table.insert(out, d.Name)
+        end
+    end
+    -- also include direct children with numeric names
     for _, child in ipairs(folder:GetChildren()) do
         if (child:IsA("Folder") or child:IsA("Model") or child:IsA("BasePart")) and isNumericName(child.Name) then
             table.insert(out, child.Name)
@@ -445,6 +483,7 @@ local function scanWorldNames()
     end
     return out
 end
+
 local function unionNames(a, b)
     local set, out = {}, {}
     for _,v in ipairs(a or {}) do v=tostring(v); if isNumericName(v) and not set[v] then set[v]=true; table.insert(out,v) end end
@@ -479,7 +518,6 @@ local quickButtons = {}      -- [i] = Rayfield Button control
 local quickActive  = {}      -- [i] = boolean (has checkpoint i right now)
 local quickInfoLabel = nil
 
--- TP cooldown helper
 local function tryTP(cf)
     local now = time()
     _G.__GN_LAST_TP = _G.__GN_LAST_TP or 0
@@ -491,7 +529,6 @@ local function tryTP(cf)
     end
 end
 
--- Button callback factory (no destroy; reuses same callback)
 local function onQuickClick(i)
     local name = tostring(i)
     if not quickActive[i] then
@@ -507,11 +544,9 @@ local function onQuickClick(i)
     end
 end
 
--- Build once
 local function buildQuickButtonsOnce()
     if #quickButtons > 0 then return end
     for i = 1, MAX_QUICK do
-        -- start “inactive”; will be renamed/activated by refresh
         local btn = TPTab:CreateButton({
             Name = ("[–] Slot %d"):format(i),
             Callback = function() onQuickClick(i) end
@@ -522,7 +557,6 @@ local function buildQuickButtonsOnce()
     quickInfoLabel = TPTab:CreateLabel("Quick TP: building…")
 end
 
--- Reconfigure text + active flags without destroying the controls
 local function reconfigureQuickButtons()
     buildQuickButtonsOnce()
 
@@ -533,7 +567,6 @@ local function reconfigureQuickButtons()
         quickActive[i] = has
         local display = has and ("TP to %s"):format(name) or ("[–] Slot %d"):format(i)
 
-        -- Rayfield buttons support :Set("new text")
         if quickButtons[i] and quickButtons[i].Set then
             pcall(function() quickButtons[i]:Set(display) end)
         end
@@ -547,6 +580,122 @@ local function reconfigureQuickButtons()
     if quickInfoLabel then pcall(function() quickInfoLabel:Set(text) end) end
 end
 
+-- Build the slots immediately; names activate after first refresh
+buildQuickButtonsOnce()
+
+----------------------------------------------------------------------
+-- Refresh UI (names from cache + deep scan), then reconfigure buttons
+----------------------------------------------------------------------
+local function refreshUI()
+    if refreshDebounce then return end
+    refreshDebounce = true
+    task.delay(0.2, function() refreshDebounce = false end)
+
+    local world = cacheOnly and {} or scanWorldNames()
+    local merged = unionNames(cachedNames, world)
+    local grew = (#merged > #cachedNames)
+    cachedNames = merged
+
+    sortAndIndex(cachedNames)
+    updateDetectedLabel()
+    rebuildSliderRange()
+    if grew then saveCache() end
+    print("[CP] " .. (#checkpoints > 0 and table.concat(namesArray(), ", ") or "(none)"))
+
+    -- Update quick-button labels/availability
+    reconfigureQuickButtons()
+end
+
+----------------------------------------------------------------------
+-- Buttons (use awaitAnchorCF)
+----------------------------------------------------------------------
+TPTab:CreateButton({
+    Name = "Teleport (selected)",
+    Callback = function()
+        local num = _G.__GN_SelectedNumeric
+        if not num then Rayfield:Notify({Title="No checkpoint", Content="Use the slider first.", Duration=2}); return end
+        selectedName = tostring(num)
+        local cf = awaitAnchorCF(selectedName, 4.0)
+        if not cf then Rayfield:Notify({Title="No anchor", Content="No part in '"..selectedName.."' yet (streaming).", Duration=2}); return end
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        hrp.CFrame = cf * CFrame.new(0,5,0); Rayfield:Notify({Title="Teleported", Content="To "..selectedName, Duration=2})
+    end
+})
+TPTab:CreateButton({
+    Name = "Auto TP through all (save positions)",
+    Callback = function()
+        local _, hrp, hum = getCharacter(); if not (hrp and hum and hum.Health>0) then return end
+        for _, cp in ipairs(checkpoints) do
+            local name = cp.name
+            local cf = awaitAnchorCF(name, 2.0)
+            if cf then
+                hrp.CFrame = cf * CFrame.new(0,5,0)
+                cachedPos[name] = {x=cf.X, y=cf.Y, z=cf.Z}; saveCache()
+                task.wait(1)
+            else
+                warn("[AutoTP] Skipped "..name.." (not streamed and no cached position)")
+            end
+        end
+        Rayfield:Notify({Title="Auto TP Complete", Duration=3})
+    end
+})
+TPTab:CreateButton({ Name = "Refresh checkpoints", Callback = refreshUI })
+TPTab:CreateToggle({
+    Name = "Cache only (skip world scan)",
+    CurrentValue = false,
+    Callback = function(v) cacheOnly = v; refreshUI() end
+})
+TPTab:CreateButton({ Name = "Save cache now", Callback = function() saveCache(); Rayfield:Notify({Title="Saved", Content="Names & positions cached", Duration=2}) end })
+TPTab:CreateButton({
+    Name = "Clear cache",
+    Callback = function()
+        if FS.has and isfile(FS.path) then pcall(function() writefile(FS.path, HttpService:JSONEncode({names={}, positions={}})) end) end
+        cachedNames, cachedPos = {}, {}; refreshUI()
+        Rayfield:Notify({Title="Cleared", Content="Checkpoint cache cleared", Duration=2})
+    end
+})
+TPTab:CreateButton({
+    Name = "Force Deep Refresh (scan all descendants)",
+    Callback = function()
+        refreshDebounce = false
+        local world = scanWorldNames()
+        cachedNames = unionNames({}, world)
+        sortAndIndex(cachedNames)
+        updateDetectedLabel()
+        rebuildSliderRange()
+        saveCache()
+        reconfigureQuickButtons()
+        Rayfield:Notify({ Title="Refreshed", Content="Deep scan completed.", Duration=2 })
+    end
+})
+
+-- Build once
+refreshUI()
+
+----------------------------------------------------------------------
+-- Watch for folder/children (rescan when new stuff streams)
+----------------------------------------------------------------------
+local folderChildConn
+Workspace.ChildAdded:Connect(function(ch)
+    if string.lower(ch.Name) == string.lower(CP_FOLDER_NAME) then
+        task.wait(0.05); refreshUI()
+        if folderChildConn then folderChildConn:Disconnect() end
+        folderChildConn = ch.DescendantAdded:Connect(function(c2)
+            if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
+                task.wait(0.05); refreshUI()
+            end
+        end)
+    end
+end)
+local f = resolveFolder()
+if f then
+    folderChildConn = f.DescendantAdded:Connect(function(c2)
+        if c2:IsA("Folder") or c2:IsA("Model") or c2:IsA("BasePart") then
+            task.wait(0.05); refreshUI()
+        end
+    end)
+end
+
 ----------------------------------------------------------------------
 -- Optional: Tap/Click to TP directly on checkpoint parts
 ----------------------------------------------------------------------
@@ -558,12 +707,15 @@ local function findOwnerUnderFolder(inst, folder)
     end
     return nil
 end
+
 local function rayFromScreen(pos)
     local cam = Workspace.CurrentCamera
+    if not cam then return nil end
     local r = cam:ViewportPointToRay(pos.X, pos.Y)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Blacklist
-    params.FilterDescendantsInstances = { LP.Character }
+    local char = LP.Character
+    params.FilterDescendantsInstances = char and { char } or {}
     return Workspace:Raycast(r.Origin, r.Direction * 2000, params)
 end
 
